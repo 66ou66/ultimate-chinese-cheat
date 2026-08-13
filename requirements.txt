@@ -1,0 +1,17 @@
+# 中国象棋 AI 助手（视觉识别 + 引擎分析 + LLM 解释）依赖
+# Python 3.7+
+
+# --- 视觉识别端（xiangqi-bot）---
+numpy>=1.21,<2.0
+opencv-python>=4.5
+pyautogui>=0.9.53
+mss>=6.1
+pygetwindow>=0.0.9
+torch>=1.13,<3.0
+torchvision>=0.14
+
+# --- LLM 解释端（DeepSeek，OpenAI 兼容）---
+requests>=2.20
+
+# --- 引擎端（engine_wrapper / fen_utils）---
+# 仅用标准库（subprocess / threading / re / dataclasses），无需额外依赖

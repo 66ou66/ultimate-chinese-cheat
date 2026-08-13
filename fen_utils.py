@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""
+Xiangqi FEN 工具函数
+
+- fen_to_board():   FEN字符串 → 棋盘二维数组 + 元数据
+- board_to_fen():   棋盘二维数组 → FEN字符串
+- uci_to_coord():   UCI走法 (b2e2) → 棋盘坐标 ((1,7), (4,7))
+- coord_to_uci():   棋盘坐标 → UCI走法
+
+约定：
+- 棋盘: 10行×9列, board[y][x], y=0是黑方底线 (rank 9), y=9是红方底线 (rank 0)
+- FEN rank: 从黑方底线开始 (y=0 → rank 9, y=9 → rank 0)
+- UCI: 列a-i对应x=0-8, rank 0-9对应y=9-0 (红方底线rank 0 = y=9)
+- turn: 'w'=红方先行, 'b'=黑方先行
+"""
+
+import re
+from typing import Tuple, List, Optional
+
+
+# --- 棋子映射 ---
+
+FEN_TO_PIECE = {
+    'K': 'K', 'R': 'R', 'N': 'N', 'B': 'B', 'A': 'A', 'C': 'C', 'P': 'P',
+    'k': 'k', 'r': 'r', 'n': 'n', 'b': 'b', 'a': 'a', 'c': 'c', 'p': 'p',
+}
+
+PIECE_TO_FEN = {v: k for k, v in FEN_TO_PIECE.items()}
+
+
+def fen_to_board(fen: str) -> Tuple[List[List[Optional[str]]], dict]:
+    """
+    将Xiangqi FEN字符串解析为棋盘数组和元数据。
+
+    Args:
+        fen: 标准Xiangqi FEN, 如 "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1"
+
+    Returns:
+        (board, meta): board[y][x] 为 'K'/'r' 等或None, meta含 turn/fullmove/halfmove 等
+    """
+    fen = fen.strip()
+    # 分离主体和 moves 部分
+    moves_part = ''
+    if ' moves ' in fen:
+        fen, moves_part = fen.split(' moves ', 1)
+
+    parts = fen.split()
+    placement = parts[0]
+    turn = parts[1] if len(parts) > 1 else 'w'
+    # parts[2], parts[3] 通常为 '-' '-'
+    halfmove = int(parts[4]) if len(parts) > 4 else 0
+    fullmove = int(parts[5]) if len(parts) > 5 else 1
+
+    board: List[List[Optional[str]]] = [[None] * 9 for _ in range(10)]
+    ranks = placement.split('/')
+
+    if len(ranks) != 10:
+        raise ValueError(f"FEN需10个rank, 实际{len(ranks)}个: {placement}")
+
+    # FEN rank 0 = 黑方底线 (y=0), rank 9 = 红方底线 (y=9)
+    for rank_idx, rank_str in enumerate(ranks):
+        y = rank_idx  # rank 0 → y=0
+        x = 0
+        for ch in rank_str:
+            if ch.isdigit():
+                x += int(ch)
+            elif ch in FEN_TO_PIECE:
+                board[y][x] = FEN_TO_PIECE[ch]
+                x += 1
+            else:
+                raise ValueError(f"FEN非法字符: '{ch}' in '{rank_str}'")
+
+    meta = {
+        'turn': turn,
+        'halfmove': halfmove,
+        'fullmove': fullmove,
+        'moves': moves_part,
+    }
+    return board, meta
+
+
+def board_to_fen(board: List[List[Optional[str]]], turn: str = 'w',
+                 halfmove: int = 0, fullmove: int = 1) -> str:
+    """
+    将棋盘数组生成Xiangqi FEN字符串。
+
+    Args:
+        board: 10x9数组, board[y][x]
+        turn: 'w'=红方先行, 'b'=黑方先行
+        halfmove: 半步数
+        fullmove: 完整回合数
+
+    Returns:
+        FEN字符串
+    """
+    rows = []
+    # y=0→黑方底线(rank 9), y=9→红方底线(rank 0); FEN从黑方底线开始
+    for y in range(10):
+        empty = 0
+        row_parts = []
+        for x in range(9):
+            piece = board[y][x]
+            if piece is None:
+                empty += 1
+            else:
+                if empty > 0:
+                    row_parts.append(str(empty))
+                    empty = 0
+                row_parts.append(PIECE_TO_FEN.get(piece, '?'))
+        if empty > 0:
+            row_parts.append(str(empty))
+        rows.append(''.join(row_parts))
+
+    return f"{'/'.join(rows)} {turn} - - {halfmove} {fullmove}"
+
+
+def uci_to_coord(uci: str) -> Tuple[Tuple[int, int], Tuple[int, int]]:
+    """
+    UCI走法 → 棋盘坐标。
+
+    UCI: a-i 对应 x=0-8, rank数字0-9
+    rank 0 = 红方底线 → y=9, rank 9 = 黑方底线 → y=0
+    即 y = 9 - int(rank)
+
+    Example:
+        uci_to_coord('b2e2') → ((1, 7), (4, 7))
+        uci_to_coord('b9c7') → ((1, 0), (2, 2))
+    """
+    m = re.match(r'([a-i])(\d{1,2})([a-i])(\d{1,2})', uci)
+    if not m:
+        raise ValueError(f"无效UCI: {uci}")
+    fx = ord(m.group(1)) - ord('a')
+    fy = 9 - int(m.group(2))
+    tx = ord(m.group(3)) - ord('a')
+    ty = 9 - int(m.group(4))
+    return (fx, fy), (tx, ty)
+
+
+def coord_to_uci(from_xy: Tuple[int, int], to_xy: Tuple[int, int]) -> str:
+    """棋盘坐标 → UCI走法。"""
+    fx, fy = from_xy
+    tx, ty = to_xy
+    return f"{chr(ord('a') + fx)}{9 - fy}{chr(ord('a') + tx)}{9 - ty}"
+
+
+def print_board(board: List[List[Optional[str]]]):
+    """打印棋盘（中文视角：红方在下）。"""
+    # 从 y=9 (红方底线) 打印到 y=0 (黑方底线)
+    for y in range(9, -1, -1):
+        row = ' '.join(board[y][x] if board[y][x] else '.' for x in range(9))
+        print(f"  {y}: {row}")
+    print("     a b c d e f g h i")
+
+
+# --- 测试 ---
+if __name__ == '__main__':
+    FEN_INITIAL = 'rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1'
+
+    print("=== 初始局面 FEN解析 ===")
+    board, meta = fen_to_board(FEN_INITIAL)
+    print(f"Turn: {meta['turn']}")
+    print_board(board)
+
+    print(f"\n重新生成FEN: {board_to_fen(board, meta['turn'])}")
+
+    print("\n=== UCI坐标测试 ===")
+    for uci in ['b2e2', 'b9c7', 'h2e2', 'a0a1']:
+        try:
+            f, t = uci_to_coord(uci)
+            print(f"  {uci} → from{f} to{t} → {coord_to_uci(f, t)}")
+        except ValueError as e:
+            print(f"  {uci} → {e}")
