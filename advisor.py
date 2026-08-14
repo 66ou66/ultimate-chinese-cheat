@@ -46,7 +46,7 @@ def print_board_cn(board, title="棋盘"):
             else:
                 line += " 十"
         print(f"  {line}")
-    print("     九 八 七 六 五 四 三 二 一")
+    print("   九 八 七 六 五 四 三 二 一")
 
 
 class Advisor:

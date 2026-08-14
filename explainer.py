@@ -6,10 +6,14 @@ LLM 解释器：用大模型解释「引擎为什么推荐这一步」。
 设计原则：
 - 抽象基类 Explainer，便于后续接入任意模型（DeepSeek / OpenAI / Ollama ...）。
 - 不阻塞主链路：无 API key 或调用失败时返回 None，主程序自动降级为"不解释"。
+- 密钥优先级：显式传入 api_key > 环境变量 DEEPSEEK_API_KEY > DEFAULT_API_KEY。
 """
 
 import os
 from abc import ABC, abstractmethod
+
+# 内置默认密钥（本地个人项目兜底用）；可通过环境变量 DEEPSEEK_API_KEY 覆盖，方便更换密钥。
+DEFAULT_API_KEY = "sk-a551aadc6ed14c16b08c6f579379c94d"
 
 
 class Explainer(ABC):
@@ -28,7 +32,7 @@ class DeepSeekExplainer(Explainer):
     MODEL = "deepseek-chat"
 
     def __init__(self, api_key=None, model=None, timeout=30):
-        self.api_key = api_key or os.environ.get("DEEPSEEK_API_KEY")
+        self.api_key = api_key or os.environ.get("DEEPSEEK_API_KEY") or DEFAULT_API_KEY
         self.model = model or self.MODEL
         self.timeout = timeout
 
@@ -39,13 +43,15 @@ class DeepSeekExplainer(Explainer):
         pv_text = "\n".join(pv_lines) if pv_lines else "(无)"
         return (
             "你是中国象棋特级大师教练，面向业余棋手做通俗易懂的讲解。\n\n"
+            "重要规则：下面这步着法是由顶级引擎（Pikafish）深度计算后给出的最佳着法，"
+            "你【只能】解释它为什么好，绝对不许改写这步、不许另给建议、不许质疑引擎结论。\n\n"
             f"当前轮到：{side_name}\n"
             f"局面 FEN：{fen}\n"
             f"引擎推荐着法：{bestmove_cn}（UCI: {bestmove_uci}），评分：{score}\n"
             f"候选变例：\n{pv_text}\n\n"
             "请用中文，控制在 200 字以内，分三点回答：\n"
             "1. 当前形势判断（谁占优、关键点在哪）\n"
-            "2. 为什么推荐这步（战术/战略意图）\n"
+            "2. 引擎为什么推荐这步（战术/战略意图，可结合评分与变例）\n"
             "3. 后续计划与对手可能的应对\n"
             "只输出这三点内容，不要客套话。"
         )
