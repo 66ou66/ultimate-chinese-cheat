@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from advisor import Advisor, format_suggestion, print_board_cn  # noqa: E402
 from explainer import DeepSeekExplainer              # noqa: E402
 from move_notation import uci_to_cn, format_score, pv_to_cn  # noqa: E402
+from calib_manager import CalibStore, run_calibration, sanitize_name  # noqa: E402
 
 
 def _read_key():
@@ -304,6 +305,195 @@ def auto_battle(advisor, state, poll_interval=0.8):
         _time.sleep(battle.poll_interval)
 
 
+def _calib_choose(store, prompt):
+    """列出模板并让用户按编号选择，返回名称；取消返回 None。"""
+    names = store.list_profiles()
+    if not names:
+        print("  ⚠ 暂无已保存的棋盘模板。")
+        return None
+    print("  已保存的棋盘:")
+    for i, n in enumerate(names, 1):
+        print(f"    {i}. {n}")
+    try:
+        raw = input(f"  {prompt}（输入编号，回车取消）: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+    if not raw:
+        return None
+    try:
+        idx = int(raw)
+    except ValueError:
+        print("  ⚠ 请输入数字编号。")
+        return None
+    if not (1 <= idx <= len(names)):
+        print("  ⚠ 编号超出范围。")
+        return None
+    return names[idx - 1]
+
+
+def _calib_select(store):
+    name = _calib_choose(store, "选择要使用的棋盘")
+    if name is None:
+        return
+    if store.activate(name):
+        print(f"  ✅ 已切换为使用棋盘「{name}」。回到主菜单按 [1] 识别即可。")
+    else:
+        print("  ❌ 激活失败，模板可能已损坏。")
+
+
+def _calib_add(store):
+    print("\n  开始添加棋盘（拖框校准）...")
+    ratios = run_calibration()
+    if ratios is None:
+        return
+    while True:
+        try:
+            raw = input("  请输入新棋盘名称（回车取消）: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if not raw:
+            print("  已取消。")
+            return
+        if not sanitize_name(raw):
+            print("  ⚠ 名称无效，请使用字母/数字/中文等。")
+            continue
+        if sanitize_name(raw) in store.list_profiles():
+            print(f"  ⚠ 名称「{sanitize_name(raw)}」已存在，请换一个。")
+            continue
+        break
+    store.save_profile(raw, ratios)
+    store.activate(raw)
+    print(f"  ✅ 已保存并设为当前棋盘「{sanitize_name(raw)}」。")
+
+
+def _calib_delete(store):
+    name = _calib_choose(store, "选择要删除的棋盘")
+    if name is None:
+        return
+    try:
+        confirm = input(f"  确认删除「{name}」？(y/N): ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return
+    if confirm != 'y':
+        print("  已取消删除。")
+        return
+    if store.delete_profile(name):
+        print(f"  ✅ 已删除棋盘「{name}」。")
+    else:
+        print("  ❌ 删除失败。")
+
+
+def _calib_rename(store):
+    name = _calib_choose(store, "选择要重命名的棋盘")
+    if name is None:
+        return
+    while True:
+        try:
+            raw = input(f"  请输入新名称（当前「{name}」，回车取消）: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if not raw:
+            print("  已取消。")
+            return
+        if not sanitize_name(raw):
+            print("  ⚠ 名称无效，请使用字母/数字/中文等。")
+            continue
+        if sanitize_name(raw) == sanitize_name(name):
+            return
+        if sanitize_name(raw) in store.list_profiles():
+            print(f"  ⚠ 名称「{sanitize_name(raw)}」已存在，请换一个。")
+            continue
+        break
+    try:
+        store.rename_profile(name, raw)
+        print(f"  ✅ 已重命名「{name}」→「{sanitize_name(raw)}」。")
+    except (ValueError, OSError) as exc:
+        print(f"  ❌ 重命名失败: {exc}")
+
+
+def _calib_revalidate(store):
+    name = _calib_choose(store, "选择要重新校验的棋盘")
+    if name is None:
+        return
+    print(f"\n  重新校验棋盘「{name}」（拖框校准）...")
+    ratios = run_calibration()
+    if ratios is None:
+        return
+    store.save_profile(name, ratios)
+    if store.active_name() == sanitize_name(name):
+        store.activate(name)
+        print(f"  ✅ 已重新校验并更新当前棋盘「{sanitize_name(name)}」。")
+    else:
+        print(f"  ✅ 已重新校验棋盘「{sanitize_name(name)}」。")
+
+
+def calib_manage(store=None):
+    """校验功能：多棋盘模板管理（主菜单按 [5] 进入）。
+
+    按键：
+      [1] 选择棋盘（激活已校验模板）
+      [2] 添加棋盘（新增校验模板）
+      [3] 删除棋盘
+      [4] 重命名
+      [5] 重新校验（选一个棋盘重新校准）
+      [Q] 返回主菜单
+    """
+    store = store or CalibStore()
+
+    # 首次进入：已有 calib.json 且还没有模板时，自动导入为「默认」并设为当前
+    if not store.list_profiles() and store.current_exists():
+        try:
+            store.import_current('默认')
+            store.activate('默认')
+            print("  已把现有 calib.json 自动导入为模板「默认」并设为当前。")
+        except Exception:
+            pass
+
+    while True:
+        names = store.list_profiles()
+        active = store.active_name()
+
+        print("\n" + "=" * 52)
+        print("  校验功能 - 棋盘模板管理")
+        print("=" * 52)
+        if names:
+            print("  已保存的棋盘:")
+            for i, n in enumerate(names, 1):
+                mark = "  √ 当前" if n == active else ""
+                print(f"    {i}. {n}{mark}")
+        else:
+            print("  暂无已保存的棋盘模板（请先按 [2] 添加）。")
+        if not active and store.current_exists():
+            print("    （当前 calib.json 未被任何模板管理，识别仍使用它）")
+
+        print("=" * 52)
+        print("  [1] 选择棋盘    [2] 添加棋盘")
+        print("  [3] 删除棋盘    [4] 重命名")
+        print("  [5] 重新校验    [Q] 返回主菜单")
+        print("=" * 52)
+
+        key = _read_key()
+        if key in ('q', '\x1b'):
+            print("Q\n  已返回主菜单。")
+            return
+        elif key == '1':
+            _calib_select(store)
+        elif key == '2':
+            _calib_add(store)
+        elif key == '3':
+            _calib_delete(store)
+        elif key == '4':
+            _calib_rename(store)
+        elif key == '5':
+            _calib_revalidate(store)
+        elif key is not None:
+            print(f"  '{key}' 无效，请按 1 / 2 / 3 / 4 / 5 / Q")
+
+
 def main():
     os.system('')  # 启用 Windows 终端 ANSI 颜色
 
@@ -331,6 +521,7 @@ def main():
     print("  [1]     识别当前棋盘并给出建议")
     print("  [3]     识别 + 人工修正 + 分析")
     print("  [4]     自动识别模式（每 x 秒识别+建议，[5]暂停，[X]设间隔）")
+    print("  [5]     校验管理（多棋盘模板：添加/选择/删除/重命名/重新校验）")
     print("  [A]     半自动落子（识别+建议 → 倒计时 → 自动点击落子，Esc 取消）")
     print("  [F]     全自动对战（自动判断轮次并落子，[Q]/[Esc] 停止）")
     print("  [R]/[B] 设定当前轮到 红方/黑方 走")
@@ -378,6 +569,9 @@ def main():
                 print("   请确认：天天象棋已打开且进入棋盘界面；校准数据有效。")
         elif key == '4':
             auto_mode(advisor, explainer, state)
+        elif key == '5':
+            print("5 - 校验功能（棋盘模板管理）...")
+            calib_manage()
         elif key == 'r':
             advisor.turn.set('w')
             print("R - 已设为红方走")
@@ -395,7 +589,7 @@ def main():
             print(f"  E - 已切换为{mode}（出建议后{'自动' if state['auto_explain'] else '不自动'}调 AI 解说）")
         else:
             if key is not None:
-                print(f"'{key}' 无效，请按 A / F / 1 / 3 / 4 / R / B / 空格 / 2 / E / Q")
+                print(f"'{key}' 无效，请按 A / F / 1 / 3 / 4 / 5 / R / B / 空格 / 2 / E / Q")
 
     advisor.close()
 
