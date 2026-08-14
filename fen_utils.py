@@ -114,6 +114,25 @@ def board_to_fen(board: List[List[Optional[str]]], turn: str = 'w',
     return f"{'/'.join(rows)} {turn} - - {halfmove} {fullmove}"
 
 
+def board_placement(board: List[List[Optional[str]]]) -> str:
+    """棋盘指纹：把 10x9 棋盘压缩成唯一字符串（供全自动对弈差分检测用）。
+
+    每格：棋子字符原样；空格用 '1'（数字字符，不与棋子字母冲突）。
+    不同局面 → 不同指纹；相同局面 → 相同指纹（幂等）。
+    """
+    return '/'.join(
+        ''.join(board[y][x] if board[y][x] else '1' for x in range(9))
+        for y in range(10)
+    )
+
+
+def is_game_over(board: List[List[Optional[str]]]) -> bool:
+    """对局是否已结束：帅('K') 或将('k') 任一不在棋盘上（有方被将死/认输）。"""
+    has_red = any(board[y][x] == 'K' for y in range(10) for x in range(9))
+    has_black = any(board[y][x] == 'k' for y in range(10) for x in range(9))
+    return not (has_red and has_black)
+
+
 def uci_to_coord(uci: str) -> Tuple[Tuple[int, int], Tuple[int, int]]:
     """
     UCI走法 → 棋盘坐标。

@@ -142,6 +142,25 @@ class Advisor:
         }
         return self.last
 
+    def run_auto(self):
+        """识别 + 分析（半自动落子用）：turn 直接由我方执哪方推导。
+
+        我方执红(playing_red=True) → turn='w'；我方执黑 → turn='b'。
+        与 run_once 的区别：不依赖手动维护的 turn，避免"对方走没走"的状态混乱。
+        """
+        board, playing_red = self.capture_board()
+        turn = 'w' if playing_red else 'b'
+        fen = self.board_to_full_fen(board, playing_red, turn)
+        result = self.analyze(fen)
+        self.last = {
+            'board': board,
+            'playing_red': playing_red,
+            'fen': fen,
+            'turn': turn,
+            'result': result,
+        }
+        return self.last
+
     def capture_and_edit(self):
         """识别 + 人工检验，返回修正后的 (board, playing_red)；取消则返回自动结果。"""
         board, playing_red = self.capture_board()
