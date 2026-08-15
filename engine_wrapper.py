@@ -196,7 +196,12 @@ class PikafishEngine:
                     infos.append(self._parse_info(line))
                 elif line.startswith('bestmove '):
                     parts = line.split()
-                    bestmove = parts[1] if len(parts) > 1 else ''
+                    raw = parts[1] if len(parts) > 1 else ''
+                    # Pikafish 象棋变体将死/困毙时输出 bestmove (none)/0000/(pass)，
+                    # 统一归一化为空字符串，表示"无合法着法"
+                    if raw.lower() in ('(none)', '0000', '(pass)', 'nomove', 'none', '0'):
+                        raw = ''
+                    bestmove = raw
                     if len(parts) > 3 and parts[2] == 'ponder':
                         ponder = parts[3]
                     break

@@ -61,6 +61,7 @@ class Advisor:
         self.multi_pv = multi_pv
         self.cnn = None
         self.last = None  # 最近一次 run_once 的结果
+        self._orientation_detected = False  # 方向是否已检测并锁定（防中盘翻转）
 
     # --- CNN 懒加载（模型加载慢，只加载一次）---
 
@@ -84,7 +85,11 @@ class Advisor:
         if not self.bot.load_calibration():
             raise RuntimeError("校准数据加载失败。请先运行校准（打开天天象棋到棋盘界面后校准）。")
         img = self.bot.screenshot_for_processing()
-        self.bot.detect_orientation(img)
+        # 方向只在首次识别时检测一次并锁定：中盘顶/底行棋子变动后
+        # "红像素比例"判定会失真，每次重检极易误判导致整盘 180° 翻转
+        if not self._orientation_detected:
+            self.bot.detect_orientation(img)
+            self._orientation_detected = True
         cnn = self.ensure_cnn()
         board = cnn.parse_board(
             img,

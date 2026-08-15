@@ -68,6 +68,7 @@ class Bot:
         self.win_y = 0
         self.win_w = 0
         self.win_h = 0
+        self._last_win_info = None   # 上次 announce 的窗口状态（防刷屏）
         self.cnn = None
 
     def _get_windows_dpi_scale(self):
@@ -79,10 +80,24 @@ class Bot:
             dpi_x = ctypes.windll.gdi32.GetDeviceCaps(hdc, 88)
             ctypes.windll.user32.ReleaseDC(0, hdc)
             return dpi_x / 96.0
-        except Exception:
+        except Exception as e:
+            print(f"  [警告] Windows DPI 检测失败，dpi_scale 按 1.0 处理: {e}")
             return 1.0
 
     # --- Window & Screenshot ---
+
+    def _announce_window(self, title):
+        """只在窗口位置/尺寸/标题变化时打印一次。
+
+        轮询截屏会反复调用 find_window()，此前每帧都打印
+        "找到窗口(...)"，把真正有用的状态日志（FEN fix、检测结果）淹没掉。
+        """
+        state = (self.win_x, self.win_y, self.win_w, self.win_h, title)
+        if getattr(self, '_last_win_info', None) == state:
+            return
+        self._last_win_info = state
+        print(f"  找到窗口({title}): ({self.win_x},{self.win_y}) "
+              f"{self.win_w}x{self.win_h}")
 
     def find_window(self):
         """Find TiantianXiangqi window on Windows."""
@@ -95,7 +110,7 @@ class Bot:
                     self.win_hwnd = w._hWnd
                     self.win_x, self.win_y = w.left, w.top
                     self.win_w, self.win_h = w.width, w.height
-                    print(f"  找到天天象棋窗口(QQChess): ({self.win_x},{self.win_y}) {self.win_w}x{self.win_h}")
+                    self._announce_window('天天象棋(QQChess)')
                     return
         for w in windows:
             if not hasattr(w, '_hWnd') or not hasattr(w, 'title'):
@@ -104,7 +119,7 @@ class Bot:
                 self.win_hwnd = w._hWnd
                 self.win_x, self.win_y = w.left, w.top
                 self.win_w, self.win_h = w.width, w.height
-                print(f"  找到窗口({w.title}): ({self.win_x},{self.win_y}) {self.win_w}x{self.win_h}")
+                self._announce_window(w.title)
                 return
         raise RuntimeError("未找到天天象棋窗口，请确认游戏已打开！")
 

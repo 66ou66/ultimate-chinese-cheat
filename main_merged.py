@@ -23,6 +23,14 @@ from explainer import DeepSeekExplainer              # noqa: E402
 from move_notation import uci_to_cn, format_score, pv_to_cn  # noqa: E402
 from calib_manager import CalibStore, run_calibration, sanitize_name  # noqa: E402
 
+# 兼容中文/emoji 输出：强制 stdout/stderr 使用 UTF-8，避免 GBK 控制台打印 ⚔/✅/⏳ 等字符崩溃
+for _stream in (sys.stdout, sys.stderr):
+    if _stream is not None and hasattr(_stream, 'reconfigure'):
+        try:
+            _stream.reconfigure(encoding='utf-8')
+        except Exception:
+            pass
+
 
 def _read_key():
     """读取单个按键并返回小写字符。"""
@@ -247,11 +255,27 @@ def auto_move_once(advisor, explainer, state, countdown=3.0):
 def auto_battle(advisor, state, poll_interval=0.8):
     """全自动对弈：识别 → 差分判断轮次 → 引擎分析 → 自动落子，循环到对局结束或手动停止。
 
-    我方执红/执黑自动判断（红方在屏幕下方 = 执红；上方 = 执黑）。
+    我方执红/执黑自动判断（CNN 红像素比例 + 开局局面底线校验双重确认）。
     按键： [Q]/[Esc] 手动停止；鼠标甩到屏幕左上角紧急中止（pyautogui.FAILSAFE）。
+
+    v2 改动：
+    - 落子回读改为"变化格定位"（diff_boards/is_same_move），不再要求全盘 90 格
+      指纹精确相等 —— 修复之前每次提示"落子回读确认失败"的问题。
+    - 等待对方用"变化格 + 连续 N 帧投票"，CNN 识别噪声不再导致永远等不到。
+    - 引擎 bestmove '(none)/0000/(pass)' 统一视为无着法 —— 修复将死时崩溃。
+    - 落子后立即用引擎校验"对方是否已无合法着法"，我方将死对方时自动判胜。
+    - 增加"无进展超时 + 最大步数"保护，防止对局静默结束时的死循环。
+
+    v3 修复（"偶发落子回读确认失败"）：
+    - 回读判定放宽为"包含预期 from/to 两格变化"（contains_move）：我方落子 +
+      对方同步走子 = 4 格变化时不再误判失败。
+    - 回读对比基准优先用已确认局面 self.last_board，消除确认帧到落子前帧的
+      时间差窗口。
+    - 等待对方时校验变化格必须是"对方颜色"的子走的，避免己方残留/方向误判
+      带偏轮次。
     """
     import time as _time
-    from auto_battle import AutoBattle
+    from auto_battle import AutoBattle, has_move
     from fen_utils import is_game_over as _is_game_over
 
     battle = AutoBattle(advisor, poll_interval=poll_interval)
@@ -266,6 +290,10 @@ def auto_battle(advisor, state, poll_interval=0.8):
     print(f"\n⚔ 全自动对战开始：我方{side}。")
     print("   按 [Q]/[Esc] 随时停止；鼠标甩到屏幕左上角紧急中止。")
     print_board_cn(board, "开局识别")
+
+    WAIT_TIMEOUT = 60.0   # 无任何进展的最大静默秒数，超时暂停防死循环
+    MAX_MOVES = 200
+    last_action = _time.time()
 
     while True:
         key = _poll_key()
@@ -285,22 +313,51 @@ def auto_battle(advisor, state, poll_interval=0.8):
             print_board_cn(board, "终局棋盘")
             return
 
+        if battle.move_count >= MAX_MOVES:
+            print(f"\n🛑 我方已走满 {MAX_MOVES} 步，达到保护上限，自动停止。")
+            return
+
         if battle.my_turn:
             # 轮到我方：引擎分析 → 自动落子 → 回读确认
             print_board_cn(board, "识别结果")
-            status = battle.play_my_move()
+            try:
+                status = battle.play_my_move()
+            except Exception as exc:
+                print(f"\n❌ 我方回合处理异常: {exc}")
+                print("   已暂停。请人工检查局面后按 [F] 重新启动；若引擎异常请先运行引擎自检。")
+                return
             if status == 'no_move':
                 print("\n🏁 引擎无合法着法，对局结束（我方被将死/困毙）。")
                 return
             if status == 'confirm_failed':
                 print("\n❌ 落子回读确认失败，已暂停。请人工检查棋盘与鼠标位置后，再按 [F] 重新启动。")
                 return
+            # 落子成功：立即校验"对方是否已无合法着法"（我方将死/困毙对方 → 判胜）
+            try:
+                opp_turn = 'b' if battle.playing_red else 'w'
+                fen = advisor.board_to_full_fen(
+                    battle.last_board, battle.playing_red, opp_turn)
+                r2 = advisor.analyze(fen)
+                if not has_move(r2.bestmove):
+                    print("\n🏆 我方已将死/困毙对方，对局结束！")
+                    print_board_cn(battle.last_board, "终局棋盘")
+                    return
+            except Exception:
+                pass  # 校验失败不阻断，继续正常监控
             print("✅ 我方已落子，继续监控对方...")
+            last_action = _time.time()
         else:
             # 等待对方：差分检测棋盘变化
             if battle.update_board(board):
                 print("\n👀 检测到对方已落子，轮到我方！")
                 print_board_cn(board, "对方走完")
+                last_action = _time.time()
+
+        # 无进展超时保护（对局静默结束/识别卡住时防死循环）
+        if _time.time() - last_action > WAIT_TIMEOUT:
+            print(f"\n⚠ 超过 {WAIT_TIMEOUT:g} 秒没有任何进展（对局可能已结束或识别卡住）。")
+            print("   请人工检查局面；若对局已结束请直接退出，若只是卡住可再按 [F] 重新启动。")
+            return
 
         _time.sleep(battle.poll_interval)
 
