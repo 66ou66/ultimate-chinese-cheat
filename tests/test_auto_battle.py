@@ -92,6 +92,32 @@ def test_start_corrects_wrong_orientation():
     assert battle.my_turn is True
 
 
+def test_start_black_detects_red_already_moved():
+    """执黑时若红方已先走一步（屏幕棋盘 = 开局 + 红炮平中）→ 直接轮到我们走。
+
+    这是修复前"红方先动一步后再启动脚本"卡在等待、需手动走一步的根因场景。
+    """
+    b1, b2, _ = _boards()          # b2 = 红炮平中（红方先走一步）
+    screen_after_red = [row[::-1] for row in reversed(b2)]
+    battle = AutoBattle(_FakeAdvisorStart(screen_after_red, False))
+    board, pr = battle.start()
+    assert pr is False
+    assert battle.my_turn is True                  # 不再卡在"等待红方"
+    assert battle.last_board == screen_after_red   # 基准仍用当前确认局面
+
+
+def test_start_black_red_not_moved_single_noise():
+    """执黑时开局局面带一个噪声格（未构成完整红方着法）→ 不误判，继续等待红方。"""
+    b1, _, _ = _boards()
+    screen1 = [row[::-1] for row in reversed(b1)]
+    noisy = [row[:] for row in screen1]
+    noisy[5][5] = 'P'   # 单格噪声（只有 to 格、无 from 格，构不成完整着法）
+    battle = AutoBattle(_FakeAdvisorStart(noisy, False))
+    battle.start()
+    assert battle.my_turn is False
+    assert battle.last_board == noisy
+
+
 def test_update_board_detect_opponent_move():
     b1, _, _ = _boards()
     b_opp = apply_move(b1, 'b7e7')   # 黑炮平中（执红时对方=黑）

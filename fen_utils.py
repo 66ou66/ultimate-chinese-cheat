@@ -18,6 +18,13 @@ import re
 from typing import Tuple, List, Optional
 
 
+# --- 常量 ---
+
+# 标准开局局面（红方在下、先手）。用于全自动对弈启动时判断
+# "执黑时红方是否已经先走一步"（对比当前棋盘与开局局面的差分）。
+INITIAL_FEN = 'rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR'
+
+
 # --- 棋子映射 ---
 
 FEN_TO_PIECE = {

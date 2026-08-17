@@ -48,6 +48,7 @@ from collections import deque
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from fen_utils import fen_to_board, INITIAL_FEN                     # noqa: E402
 from move_notation import apply_move                               # noqa: E402
 from board_diff import (diff_boards, contains_move, moves_in_diff)  # noqa: E402
 
@@ -85,6 +86,38 @@ def _infer_orientation(board):
     if top_red == 9 and bot_red == 0:
         return False
     return None
+
+
+def _initial_screen_board(playing_red):
+    """标准开局局面在【屏幕方向】下的棋盘。
+
+    我方执红（红在屏幕下方）→ 屏幕方向 == 标准方向，直接返回；
+    我方执黑（红在屏幕上方）→ 屏幕方向 = 标准方向旋转 180°。
+    """
+    init, _ = fen_to_board(INITIAL_FEN)
+    if playing_red:
+        return init
+    return [row[::-1] for row in reversed(init)]
+
+
+def _red_already_moved(board, playing_red):
+    """判断红方是否已经先走一步（启动时执黑用）。
+
+    把当前【屏幕方向】棋盘与标准开局局面做差分：若差分里存在一条
+    from 格旧子是红方（大写）的着法，说明红方已落过子（正常是先手第一步，
+    也可能是中盘的某一步红棋）。有则返回 True（现在轮到我方黑方走），
+    否则返回 False（仍是开局未动，等待红方先走）。
+
+    噪声容忍与 update_board 一致：用 moves_in_diff 枚举候选单步，
+    单个噪声格无法构成 from→to 完整着法，不会误判。
+    """
+    init = _initial_screen_board(playing_red)
+    diff = diff_boards(init, board)
+    for fy, fx, _, _ in moves_in_diff(diff):
+        piece = init[fy][fx]
+        if piece and piece.isupper():
+            return True
+    return False
 
 
 def _apply_uci_on_screen(board, uci, playing_red):
@@ -132,7 +165,8 @@ class AutoBattle:
     def start(self):
         """开局：识别我方执哪方，初始化差分状态机。
 
-        执红(playing_red=True) → 我方先行；执黑 → 等待对方先走。
+        执红(playing_red=True) → 我方先行；执黑 → 若红方已经先走一步
+        （棋盘已偏离开局局面）则直接轮到我方，否则等待对方先走。
         方向判定：CNN 红色比例 + 开局局面底线校验双重确认，
         校验不一致时以开局局面（顶/底行整列满子）为准。
 
@@ -147,7 +181,14 @@ class AutoBattle:
             playing_red = inferred
         self.playing_red = playing_red
         self.last_board = [row[:] for row in board]
-        self.my_turn = playing_red
+        # 执红（先手）→ 立即轮到我方；
+        # 执黑（后手）→ 若红方已经先走一步（棋盘已偏离开局局面）则直接轮到
+        # 我方，否则等待红方先走。修复"红方先动一步后再启动脚本"时脚本
+        # 卡在等待、需手动走一步才能继续的问题。
+        if playing_red:
+            self.my_turn = True
+        else:
+            self.my_turn = _red_already_moved(board, playing_red)
         return board, playing_red
 
     # --- 差分检测（等待对方时每轮调用）---
