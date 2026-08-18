@@ -10,9 +10,18 @@ AI 解说验证：不依赖屏幕/引擎，直接调用 DeepSeek API。
 import os
 import sys
 
+# 兼容中文/emoji 输出：强制 stdout/stderr 使用 UTF-8，避免 GBK 控制台打印 ⚔/✅/⏳ 等字符崩溃
+for _stream in (sys.stdout, sys.stderr):
+    if _stream is not None and hasattr(_stream, 'reconfigure'):
+        try:
+            _stream.reconfigure(encoding='utf-8')
+        except Exception:
+            pass
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from explainer import DeepSeekExplainer  # noqa: E402
+from ai_settings import get_settings        # noqa: E402
+from explainer import DeepSeekExplainer     # noqa: E402
 
 FEN_INIT = 'rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1'
 
@@ -20,11 +29,13 @@ FEN_INIT = 'rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 
 def main():
     explainer = DeepSeekExplainer()
     if not explainer.available():
-        print("❌ 未配置密钥，AI 解说不可用。")
+        print("❌ 未检测到 API 密钥，AI 解说不可用。")
+        print("   请按 [9] 进入 AI 设置配置 API 密钥（DeepSeek 密钥）后再运行。")
         return 1
 
-    print(f"[AI] API_URL={explainer.API_URL}")
-    print(f"[AI] MODEL  ={explainer.model}")
+    _s = get_settings()
+    print(f"[AI] API_URL={_s['api_url']}")
+    print(f"[AI] MODEL  ={_s['model']}")
     print(f"[AI] 密钥前 8 位: {explainer.api_key[:8]}...")
 
     text = explainer.explain(

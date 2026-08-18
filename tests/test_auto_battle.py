@@ -7,6 +7,14 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# 兼容中文/emoji 输出（直接跑测试时 stdout 可能是 GBK，避免 ✓/✗ 打印崩溃）
+for _stream in (sys.stdout, sys.stderr):
+    if _stream is not None and hasattr(_stream, 'reconfigure'):
+        try:
+            _stream.reconfigure(encoding='utf-8', errors='replace')
+        except Exception:
+            pass
+
 from fen_utils import fen_to_board, board_placement, is_game_over  # noqa: E402
 from move_notation import apply_move                               # noqa: E402
 from board_diff import diff_boards                                 # noqa: E402

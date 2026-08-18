@@ -6,14 +6,16 @@ LLM 解释器：用大模型解释「引擎为什么推荐这一步」。
 设计原则：
 - 抽象基类 Explainer，便于后续接入任意模型（DeepSeek / OpenAI / Ollama ...）。
 - 不阻塞主链路：无 API key 或调用失败时返回 None，主程序自动降级为"不解释"。
-- 密钥优先级：显式传入 api_key > 环境变量 DEEPSEEK_API_KEY > DEFAULT_API_KEY。
+- 所有设定（API 密钥 / 服务端地址 / 模型名 / 请求参数）集中管理：
+  默认值在 ai_config.py；运行时可在主菜单 [9]「AI 解说设置」中修改，
+  保存到 ai_settings.json 并立即生效，无需重启、无需手改源码。
+- 密钥优先级：显式传入 api_key > 环境变量 DEEPSEEK_API_KEY > 配置文件（ai_settings）。
 """
 
 import os
 from abc import ABC, abstractmethod
 
-# 内置默认密钥（本地个人项目兜底用）；可通过环境变量 DEEPSEEK_API_KEY 覆盖，方便更换密钥。
-DEFAULT_API_KEY = "sk-a551aadc6ed14c16b08c6f579379c94d"
+from ai_settings import get_settings  # noqa: E402
 
 
 class Explainer(ABC):
@@ -26,17 +28,47 @@ class Explainer(ABC):
 
 
 class DeepSeekExplainer(Explainer):
-    """DeepSeek（OpenAI 兼容）解释器。"""
+    """DeepSeek（OpenAI 兼容）解释器。
 
-    API_URL = "https://api.deepseek.com/chat/completions"
-    MODEL = "deepseek-chat"
+    每次 available()/explain() 前都会重新读取 ai_settings（默认值 +
+    ai_settings.json 覆盖），因此在 [9] AI 设置菜单中修改参数后，
+    下一次调用立即生效，无需重启程序。
+    """
 
-    def __init__(self, api_key=None, model=None, timeout=30):
-        self.api_key = api_key or os.environ.get("DEEPSEEK_API_KEY") or DEFAULT_API_KEY
-        self.model = model or self.MODEL
-        self.timeout = timeout
+    def __init__(self, api_key=None, model=None, timeout=None):
+        # 显式传入参数优先（测试/特殊场景用），None 表示走配置文件
+        self._api_key_override = api_key
+        self._model_override = model
+        self._timeout_override = timeout
+        # 当前生效值（供 available / explain / 外部读取，如 verify_explainer）
+        self.api_key = None
+        self.model = None
+        self.timeout = None
+        self.api_url = None
+        self.temperature = None
+        self.max_tokens = None
+        self._refresh()
+
+    def _refresh(self):
+        """把当前生效设置刷新到实例属性。
+
+        密钥来源：显式传入 > 环境变量 DEEPSEEK_API_KEY > ai_settings
+        （默认值来自 ai_config.py，可被 ai_settings.json 覆盖）。
+        """
+        s = get_settings()
+        self.api_key = (self._api_key_override
+                        or os.environ.get("DEEPSEEK_API_KEY")
+                        or s.get('api_key') or None)
+        self.model = self._model_override or s.get('model')
+        self.timeout = (self._timeout_override
+                        if self._timeout_override is not None
+                        else s.get('timeout'))
+        self.api_url = s.get('api_url')
+        self.temperature = s.get('temperature')
+        self.max_tokens = s.get('max_tokens')
 
     def available(self):
+        self._refresh()
         return bool(self.api_key)
 
     def _build_prompt(self, fen, bestmove_cn, bestmove_uci, score, pv_lines, side_name):
@@ -57,6 +89,7 @@ class DeepSeekExplainer(Explainer):
         )
 
     def explain(self, fen, bestmove_cn, bestmove_uci, score, pv_lines, side_name):
+        self._refresh()
         if not self.api_key:
             return None
 
@@ -69,8 +102,8 @@ class DeepSeekExplainer(Explainer):
                 {"role": "system", "content": "你是一位耐心的中国象棋教练。"},
                 {"role": "user", "content": prompt},
             ],
-            "temperature": 0.4,
-            "max_tokens": 500,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
         }
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -78,7 +111,8 @@ class DeepSeekExplainer(Explainer):
         }
 
         try:
-            resp = requests.post(self.API_URL, json=payload, headers=headers, timeout=self.timeout)
+            resp = requests.post(self.api_url, json=payload, headers=headers,
+                                 timeout=self.timeout)
             resp.raise_for_status()
             data = resp.json()
             return data["choices"][0]["message"]["content"].strip()

@@ -12,12 +12,14 @@
   C              清空整个棋盘
   R              重置为CNN自动识别结果
   Enter          确认并输出FEN
-  Esc            取消返回主菜单
+  Esc / `        取消返回主菜单（` 为全局紧急退出键，无需点回本窗口）
 """
 
 import os
 import sys
 import msvcrt
+
+from hotkey import poll_stop
 
 # --- 常量 ---
 
@@ -82,6 +84,21 @@ def get_key():
 
 
 
+def get_key_or_hotkey():
+    """阻塞等待按键，期间轮询全局 `` ` `` 键（1 键左边）。
+
+    `` ` `` 键被按下时返回 ('esc', None)（等同 Esc 取消返回主菜单），
+    不依赖窗口焦点；有普通按键则交给 get_key() 解析方向键/字符。
+    """
+    import time as _time
+    while True:
+        if poll_stop():
+            return 'esc', None
+        if msvcrt.kbhit():
+            return get_key()
+        _time.sleep(0.02)
+
+
 class ManualBoardEditor:
     """终端交互式棋盘编辑器。board[r][c]: r=0→顶部(黑底线), r=9→底部(红底线)."""
 
@@ -102,7 +119,7 @@ class ManualBoardEditor:
         while True:
             self._draw()
             self._first = False
-            kt, kv = get_key()
+            kt, kv = get_key_or_hotkey()
 
             if kt == 'enter':
                 return self.board
@@ -198,7 +215,7 @@ class ManualBoardEditor:
         print("=" * 50)
         print()
         print(f"  {WHITE}[1-7]{RST_CLR}红方  {WHITE}[Shift+1-7]{RST_CLR}黑方  {WHITE}[0]{RST_CLR}清除  {WHITE}[C]{RST_CLR}清盘  {WHITE}[R]{RST_CLR}重置")
-        print(f"  {WHITE}[Enter]{RST_CLR}确认  {WHITE}[Esc]{RST_CLR}取消")
+        print(f"  {WHITE}[Enter]{RST_CLR}确认  {WHITE}[Esc]{RST_CLR}/[`]取消")
         print()
         print(f"  {RED_CLR}红方:{RST_CLR} [1]车 [2]马 [3]相 [4]仕 [5]帅 [6]炮 [7]兵")
         print(f"  {DIM_CLR}黑方:{RST_CLR} [1]车 [2]马 [3]象 [4]士 [5]将 [6]炮 [7]卒")
