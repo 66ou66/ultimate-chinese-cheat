@@ -268,11 +268,13 @@ class _FakeResult:
 class _FakeAdvisor:
     """假的 Advisor：run_auto 返回固定着法；capture_board 返回指定局面。"""
 
-    def __init__(self, board, playing_red, bestmove='b2e2', after_board=None):
+    def __init__(self, board, playing_red, bestmove='b2e2', after_board=None,
+                 collapsed=False):
         self.board = board
         self.playing_red = playing_red
         self.bestmove = bestmove
         self.after_board = after_board
+        self.collapsed = collapsed
         self.bot = _FakeBot()
 
     def run_auto(self):
@@ -287,6 +289,9 @@ class _FakeAdvisor:
         if self.after_board is not None:
             return self.after_board, self.playing_red
         return self.board, self.playing_red
+
+    def recognition_collapsed(self, threshold=15):
+        return self.collapsed
 
 
 class _FakeBot:
@@ -367,6 +372,19 @@ def test_play_my_move_confirm_failed():
     try:
         assert battle.play_my_move(max_retries=1, max_reads=2,
                                    wait_anim=0.01, wait_read=0.01) == 'confirm_failed'
+    finally:
+        patcher.stop()
+
+
+def test_play_my_move_board_gone_on_collapse():
+    """识别质量崩溃（对手投降/超时跳结算界面）→ 不再落子，返回 board_gone。"""
+    b1, _, _ = _boards()
+    fake = _FakeAdvisor(b1, playing_red=True, bestmove='b2e2', collapsed=True)
+    battle = AutoBattle(fake, click_interval=0.01)
+    patcher = _patch_pyautogui()
+    try:
+        assert battle.play_my_move(max_retries=1, max_reads=2,
+                                   wait_anim=0.01, wait_read=0.01) == 'board_gone'
     finally:
         patcher.stop()
 

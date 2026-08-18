@@ -9,7 +9,7 @@
       我方回合：引擎分析 → 自动点击落子 → 回读确认 → 回到等待对方
 
 纯逻辑部分（diff_boards / single_move_from_diff / is_same_move /
-contains_move / _infer_orientation / AutoBattle.update_board / start / play_my_move）
+contains_move / infer_orientation / AutoBattle.update_board / start / play_my_move）
 不依赖 pyautogui / 引擎 / 窗口，可独立单测；落子依赖在方法内 lazy import。
 
 v2 重写要点（相对 v1 的"全盘 90 格精确指纹匹配"）：
@@ -48,7 +48,7 @@ from collections import deque
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from fen_utils import fen_to_board, INITIAL_FEN                     # noqa: E402
+from fen_utils import fen_to_board, INITIAL_FEN, infer_orientation  # noqa: E402
 from move_notation import apply_move                               # noqa: E402
 from board_diff import (diff_boards, contains_move, moves_in_diff)  # noqa: E402
 
@@ -68,24 +68,9 @@ def has_move(bestmove):
     return bestmove.strip().lower() not in _NO_MOVE_TOKENS
 
 
-def _infer_orientation(board):
-    """开局局面（标准列位满子）时，从棋子颜色可靠推断我方执红/执黑。
-
-    顶行全为黑、底行全为红 → 红在屏幕下方 → 我方执红(True)；
-    顶行全为红、底行全为黑 → 红在屏幕上方 → 我方执黑(False)；
-    非标准开局（中盘/底行有缺）→ 返回 None，沿用已锁定方向，避免中盘误判。
-    """
-    top = board[0]
-    bot = board[9]
-    if not (all(p is not None for p in top) and all(p is not None for p in bot)):
-        return None
-    top_red = sum(1 for p in top if p.isupper())
-    bot_red = sum(1 for p in bot if p.isupper())
-    if top_red == 0 and bot_red == 9:
-        return True
-    if top_red == 9 and bot_red == 0:
-        return False
-    return None
+# 兼容别名：方向推断已上移至 fen_utils.infer_orientation（advisor 手动模式同样
+# 使用），保留旧名供现有调用方/测试引用，逻辑完全一致。
+_infer_orientation = infer_orientation
 
 
 def _initial_screen_board(playing_red):
@@ -134,6 +119,38 @@ def _apply_uci_on_screen(board, uci, playing_red):
     return [row[::-1] for row in reversed(std)]
 
 
+# --- 落子回读诊断格式化（人工排查 confirm_failed 用） ---
+_PIECE_CN = {
+    'R': '红车', 'N': '红马', 'B': '红相', 'A': '红仕', 'K': '红帅',
+    'C': '红炮', 'P': '红兵',
+    'r': '黑车', 'n': '黑马', 'b': '黑象', 'a': '黑士', 'k': '黑将',
+    'c': '黑炮', 'p': '黑卒',
+}
+
+
+def _piece_cn(piece):
+    """棋子字符 → 中文名；None → '空'。"""
+    if piece is None:
+        return '空'
+    return _PIECE_CN.get(piece, piece)
+
+
+def _fmt_cells(cells):
+    """变化格 [(y, x, old, new), ...] → 可读描述，如 '(7,1) 红炮→空 (7,4) 空→红炮'。
+
+    y=行（0 为屏幕顶部），x=列（0..8，屏幕方向），与 AutoPlayer 的
+    [点击] 格(r,c) 及 print_board_cn 同一坐标体系。
+    """
+    return '  '.join(f"({y},{x}) {_piece_cn(o)}→{_piece_cn(n)}"
+                     for y, x, o, n in cells)
+
+
+def _fmt_moves(moves):
+    """候选着法 [(fy, fx, ty, tx), ...] → '(fy,fx)→(ty,tx)' 列表。"""
+    return '  '.join(f"({fy},{fx})→({ty},{tx})"
+                     for fy, fx, ty, tx in moves)
+
+
 class AutoBattle:
     """全自动对弈状态机（v2：变化格定位 + 多帧投票）。
 
@@ -174,7 +191,7 @@ class AutoBattle:
             (board, playing_red)
         """
         board, playing_red = self.advisor.capture_board()
-        inferred = _infer_orientation(board)
+        inferred = infer_orientation(board)
         if inferred is not None and inferred != playing_red:
             # 方向与开局局面不符 → 以开局局面为准修正（同步到底层 Bot）
             self.advisor.bot.playing_red = inferred
@@ -276,8 +293,15 @@ class AutoBattle:
             'no_move': 引擎无合法着法（对局结束）
             'ok': 落子成功并回读确认
             'confirm_failed': 回读确认失败（需人工介入）
+            'board_gone': 识别质量崩溃（棋盘疑似已切换为结算界面：对手投降/超时），
+                          按对局结束处理，不应再落子
         """
         data = self.advisor.run_auto()
+        # 识别质量崩溃 = 棋盘已不在画面（对手投降/超时跳转结算界面）：
+        # 此时识别出的"局面"是垃圾，绝不能据此落子，直接按对局结束处理。
+        if getattr(self.advisor, 'recognition_collapsed', lambda: False)():
+            print("    [识别崩溃] 棋盘疑似已切换为结算界面（对手投降/超时），不再落子。")
+            return 'board_gone'
         result = data['result']
         if not has_move(result.bestmove):
             return 'no_move'
@@ -336,10 +360,26 @@ class AutoBattle:
             if confirmed:
                 return 'ok'
             # 确实对不上预期 → 不盲目重复点击，打印诊断后交人工
-            print(f"    [回读诊断] 预期变化格={d_expected.changed}")
+            print(f"    [回读诊断] 引擎着法 uci={uci}"
+                  f"（{'执红' if data['playing_red'] else '执黑'}）")
+            print("    [回读诊断] 预期变化格: " + _fmt_cells(d_expected.changed))
             if last_actual is not None:
-                print(f"    [回读诊断] 实际变化格={last_actual.changed}")
+                print("    [回读诊断] 实际变化格: " + _fmt_cells(last_actual.changed))
+                cands = moves_in_diff(last_actual)
+                if cands:
+                    shown = cands[:6]
+                    extra = '' if len(cands) <= 6 else f" …（共 {len(cands)} 个）"
+                    print("    [回读诊断] 实际可识别着法: "
+                          + _fmt_moves(shown) + extra)
+                else:
+                    print("    [回读诊断] 实际变化不构成任何同色 from→to 着法"
+                          "（多为识别噪声 / 棋子颜色被认错）")
             else:
                 print("    [回读诊断] 读取不到稳定局面（连续识别失败）")
             break
+        # 兜底：确认失败先排除"棋盘已消失"（对手投降/超时跳结算界面），
+        # 此时不是落子失败而是对局结束，交上层按 finished 处理。
+        if getattr(self.advisor, 'recognition_collapsed', lambda: False)():
+            print("    [识别崩溃] 回读阶段棋盘疑似已切换为结算界面（对手投降/超时）。")
+            return 'board_gone'
         return 'confirm_failed'

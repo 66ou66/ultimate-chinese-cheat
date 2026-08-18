@@ -21,11 +21,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from advisor import Advisor, format_suggestion, print_board_cn  # noqa: E402
 from explainer import DeepSeekExplainer              # noqa: E402
 from move_notation import uci_to_cn, format_score, pv_to_cn  # noqa: E402
+from fen_utils import to_engine_board  # noqa: E402
 from calib_manager import CalibStore, run_calibration, sanitize_name  # noqa: E402
 from hotkey import poll_stop                                   # noqa: E402
 from infinite_battle import (ClickPointStore, get_cursor_pos,  # noqa: E402
                              move_mouse, run_infinite_battle)
 from ai_settings import FIELDS, get_settings, reset_settings, save_settings  # noqa: E402
+from auto_mode_settings import get_interval, save_interval            # noqa: E402
 
 # 兼容中文/emoji 输出：强制 stdout/stderr 使用 UTF-8，避免 GBK 控制台打印 ⚔/✅/⏳ 等字符崩溃
 for _stream in (sys.stdout, sys.stderr):
@@ -114,13 +116,14 @@ def _ai_explain_last(advisor, explainer):
         return None
 
     board = data['board']
-    best_cn = uci_to_cn(result.bestmove, board)
+    eb = to_engine_board(board, data['playing_red'])
+    best_cn = uci_to_cn(result.bestmove, eb)
     best_score = format_score(
         result.candidates[0].score_cp,
         result.candidates[0].score_mate,
     ) if result.candidates else '?'
     pv_lines = [
-        f"#{c.multipv} {' '.join(pv_to_cn(c.pv, board)[:6])} ({format_score(c.score_cp, c.score_mate)})"
+        f"#{c.multipv} {' '.join(pv_to_cn(c.pv, eb)[:6])} ({format_score(c.score_cp, c.score_mate)})"
         for c in result.candidates
     ]
     side_name = '红方' if data['turn'] == 'w' else '黑方'
@@ -142,7 +145,7 @@ def auto_mode(advisor, explainer, state):
 
     按键：
       [5]      暂停 / 恢复自动识别
-      [X]      设置间隔秒数（最小 0.5 秒）
+      [X]      设置间隔秒数（最小 0.5 秒，修改后自动保存，重启仍生效）
       [R]/[B]  设定当前轮到 红方/黑方 走
       [空格]   翻转轮次
       [E]      切换自动解说（出建议后自动调 AI 解说）
@@ -151,7 +154,7 @@ def auto_mode(advisor, explainer, state):
     """
     import time as _time
 
-    interval = 3.0
+    interval = get_interval()
     paused = False
     last_run = 0.0  # 初始为0 → 进入模式后立即识别一次，随后每 interval 秒识别
 
@@ -179,7 +182,8 @@ def auto_mode(advisor, explainer, state):
             print(f"\n  ⏸ 自动识别{status}（当前间隔 {interval:g} 秒，按 [5] 切换）")
         elif key == 'x':
             interval = _input_interval(interval)
-            print(f"  ✅ 间隔已设为 {interval:g} 秒")
+            save_interval(interval)
+            print(f"  ✅ 间隔已设为 {interval:g} 秒（已保存，重启后自动生效）")
         elif key == 'r':
             advisor.turn.set('w')
             print("  R - 已设为红方走")
@@ -245,7 +249,7 @@ def auto_move_once(advisor, explainer, state, countdown=3.0):
         return
 
     side = '红方' if data['turn'] == 'w' else '黑方'
-    best_cn = uci_to_cn(result.bestmove, data['board'])
+    best_cn = uci_to_cn(result.bestmove, to_engine_board(data['board'], data['playing_red']))
     print(f"\n🖱 自动落子: {best_cn} ({result.bestmove})  "
           f"（我方{'执红' if data['playing_red'] else '执黑'}，当前 {side}走）")
 
@@ -936,7 +940,7 @@ def main():
     print("  [5]     校验管理（多棋盘模板：添加/选择/删除/重命名/重新校验）")
     print("  [9]     AI 解说设置（API 密钥/地址/模型/超时/随机性/max_tokens）")
     print("  [A]     半自动落子（识别+建议 → 倒计时 → 自动点击落子，Esc/` 取消）")
-    print("  [F]     全自动对战（自动判断轮次并落子，[Q]/[Esc]/[`] 停止）")
+    print("  [F]     全自动对战（自动判断执红/执黑与轮次；执黑会自动等对方走完，[Q]/[Esc]/[`] 停止）")
     print("  [6]     无限全自动对战（对局结束自动点坐标续局，[1~4] 配置坐标）")
     print("  [`]     全局紧急退出键：自动/半自动/识别/校验/编辑中随时按它返回主菜单")
     print("  [R]/[B] 设定当前轮到 红方/黑方 走")

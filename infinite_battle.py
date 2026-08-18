@@ -282,7 +282,7 @@ def play_one_game(advisor, battle, poll_key=None):
         poll_key: 非阻塞键盘读取函数（测试可注入），默认 _poll_key
 
     Returns:
-        'finished': 对局正常结束（帅/将缺失 / 引擎无着法 / 我方将死对方）
+        'finished': 对局正常结束（帅/将缺失 / 引擎无着法 / 我方将死对方 / 识别崩溃判定结束）
         'stopped': 用户按 `` ` `` / Q / Esc 手动停止
         'abort': 异常停止（落子确认失败 / 引擎异常 / 超时 / 步数上限）
     """
@@ -313,6 +313,13 @@ def play_one_game(advisor, battle, poll_key=None):
             print_board_cn(board, "终局棋盘")
             return 'finished'
 
+        # 识别质量崩溃 = 棋盘疑似已不在画面（对手投降/时间耗尽 → 提前跳到结算
+        # 界面）。is_game_over 只查帅/将，垃圾棋盘里恰好仍含 K/k 时不判结束，
+        # 这里用"合法性校验修正数激增"兜底判定对局结束，进入后续自动续局流程。
+        if getattr(advisor, 'recognition_collapsed', None) and advisor.recognition_collapsed():
+            print("\n🏁 识别质量骤降（棋盘疑似已切换为结算界面：对手投降/超时），对局结束。")
+            return 'finished'
+
         if battle.move_count >= MAX_MOVES:
             print(f"\n🛑 我方已走满 {MAX_MOVES} 步，达到保护上限，自动停止。")
             return 'abort'
@@ -329,6 +336,9 @@ def play_one_game(advisor, battle, poll_key=None):
                 return 'abort'
             if status == 'no_move':
                 print("\n🏁 引擎无合法着法，对局结束（我方被将死/困毙）。")
+                return 'finished'
+            if status == 'board_gone':
+                print("\n🏁 识别质量骤降（棋盘已切换为结算界面：对手投降/超时），对局结束。")
                 return 'finished'
             if status == 'confirm_failed':
                 print("\n❌ 落子回读确认失败，已暂停。请人工检查棋盘与鼠标位置后，"

@@ -133,12 +133,16 @@ def test_click_sequence_single_point_no_wait():
 # --- play_one_game（单局状态机）---
 
 class _FakeAdvisor:
-    def __init__(self, board, playing_red=True):
+    def __init__(self, board, playing_red=True, collapsed=False):
         self._board = board
         self._playing_red = playing_red
+        self._collapsed = collapsed
 
     def capture_board(self):
         return [row[:] for row in self._board], self._playing_red
+
+    def recognition_collapsed(self, threshold=15):
+        return self._collapsed
 
 
 class _FakeBattle:
@@ -172,6 +176,18 @@ def test_play_one_game_max_moves_aborts():
     battle.move_count = 200   # 触发保护上限
     status = play_one_game(advisor, battle, poll_key=lambda: None)
     assert status == 'abort'
+
+
+def test_play_one_game_finished_on_recognition_collapse():
+    """对手投降/超时跳结算界面 → 识别崩溃 → 判定对局结束（返回 finished）。
+
+    完整开局棋盘（帅将都在 → is_game_over 为 False），仅凭识别崩溃信号
+    （last_corrections >= 阈值）就应判定结束，与 is_game_over 互补。
+    """
+    board, _ = fen_to_board(FEN1)
+    advisor = _FakeAdvisor(board, collapsed=True)
+    status = play_one_game(advisor, _FakeBattle(), poll_key=lambda: None)
+    assert status == 'finished'
 
 
 # --- run_infinite_battle（无限循环）---

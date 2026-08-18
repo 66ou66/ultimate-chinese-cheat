@@ -408,6 +408,7 @@ class PieceClassifierCNN:
             with open(model_path, 'rb') as f_load:
                 self.model.load_state_dict(torch.load(f_load, map_location=self.device))
         self.model.eval()
+        self.last_corrections = 0   # 最近一次 parse_board 合法性校验的修正格数（识别质量信号）
 
     def classify_cell(self, patch):
         """Classify a single cell patch. Returns (piece_char_or_None, confidence)."""
@@ -481,6 +482,7 @@ class PieceClassifierCNN:
                     fname = f"{prefix}r{r}c{c}_{conf*100:.0f}.png"
                     _save_img(os.path.join(debug_dir, subdir, fname), patch)
 
+        self.last_corrections = 0   # 本次识别先清零，_validate_board 会写入实际修正数
         board = self._validate_board(board)
         return board
 
@@ -532,6 +534,7 @@ class PieceClassifierCNN:
 
         if changes:
             print(f"    FEN validation: corrected {changes} cell(s)")
+        self.last_corrections = changes   # 识别质量信号：修正数激增 = 棋盘疑似不在画面
         return board
 
 

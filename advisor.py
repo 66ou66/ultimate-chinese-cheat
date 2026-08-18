@@ -19,6 +19,7 @@ from xiangqi_bot import Bot                       # noqa: E402
 from engine_wrapper import PikafishEngine         # noqa: E402
 from turn_detector import TurnDetector            # noqa: E402
 from move_notation import uci_to_cn, format_score, apply_move, pv_to_cn, uci_cn # noqa: E402
+from fen_utils import to_engine_board, infer_orientation  # noqa: E402
 
 
 RED = '\033[31m'
@@ -101,7 +102,31 @@ class Advisor:
             self.bot.cell_w,
             self.bot.cell_h,
         )
+        # 方向双重校验：detect_orientation() 只靠"红像素比例"，玩家执黑时
+        # （红在屏幕上方）可能误判为执红，导致整盘 180° 翻转、引擎乱指导。
+        # 开局局面（顶/底行整列满子）用棋子颜色可靠校验，不一致则以棋盘
+        # 内容为准（与 auto_battle.AutoBattle.start() 的双重确认一致）；
+        # 中盘返回 None 时沿用已锁定方向，不做覆盖。
+        inferred = infer_orientation(board)
+        if inferred is not None and inferred != self.bot.playing_red:
+            self.bot.playing_red = inferred
         return board, self.bot.playing_red
+
+    def recognition_collapsed(self, threshold=15):
+        """识别质量是否崩溃（棋盘疑似已不在画面）。
+
+        依据：CNN 合法性校验 _validate_board 的修正格子数。正常对局（校准正确、
+        画面确实是棋盘）修正数应为个位数；对手投降 / 时间耗尽时天天象棋提前
+        跳到结算界面，棋盘消失，CNN 会在非棋盘画面上自信地误判出大量超出规则
+        上限的棋子 → 修正数激增（实测 36）。阈值 15 足够与正常识别分离。
+
+        Returns:
+            True = 识别质量崩溃，应把当前状态判定为"对局已结束"。
+        """
+        cnn = getattr(self, 'cnn', None)
+        if cnn is None:
+            return False
+        return getattr(cnn, 'last_corrections', 0) >= threshold
 
     # --- FEN 生成 ---
 
@@ -212,6 +237,7 @@ def format_suggestion(data):
     board = data['board']
     result = data['result']
     playing_red = data['playing_red']
+    eb = to_engine_board(board, playing_red)
 
     side_name = '红方' if data['turn'] == 'w' else '黑方'
     lines = []
@@ -222,13 +248,13 @@ def format_suggestion(data):
         lines.append("⚠ 引擎未返回着法（可能已结束或局面异常）")
         return '\n'.join(lines)
 
-    best_cn = uci_cn(result.bestmove, board)
+    best_cn = uci_cn(result.bestmove, eb)
     best_score = format_score(result.candidates[0].score_cp, result.candidates[0].score_mate) \
         if result.candidates else '?'
 
     lines.append(f"最佳着法: {best_cn}  评分 {best_score}")
     if result.ponder:
-        ponder_board = apply_move(board, result.bestmove)
+        ponder_board = apply_move(eb, result.bestmove)
         lines.append(f"对方可能应着(Ponder): {uci_cn(result.ponder, ponder_board)}")
 
     if result.candidates:
@@ -236,7 +262,7 @@ def format_suggestion(data):
         lines.append("候选变例 (MultiPV):")
         for c in result.candidates:
             score = format_score(c.score_cp, c.score_mate)
-            pv = ' '.join(pv_to_cn(c.pv, board)[:8])
+            pv = ' '.join(pv_to_cn(c.pv, eb)[:8])
             lines.append(f"  #{c.multipv} depth={c.depth:<3} {score:<10} {pv}")
 
     return '\n'.join(lines)

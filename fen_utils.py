@@ -121,6 +121,37 @@ def board_to_fen(board: List[List[Optional[str]]], turn: str = 'w',
     return f"{'/'.join(rows)} {turn} - - {halfmove} {fullmove}"
 
 
+def to_engine_board(board, playing_red):
+    # Black player: screen board is standard/engine board rotated 180 deg.
+    if playing_red:
+        return board
+    return [row[::-1] for row in reversed(board)]
+
+
+def infer_orientation(board):
+    """开局局面（顶/底行整列满子）时，从棋子颜色可靠推断玩家执红/执黑。
+
+    顶行全为黑（小写）、底行全为红（大写） → 红在屏幕下方 → 玩家执红(True)；
+    顶行全为红、底行全为黑 → 红在屏幕上方 → 玩家执黑(False)；
+    非标准开局（中盘/顶底行有缺子）→ 返回 None，沿用已锁定方向，避免中盘误判。
+
+    说明：与 auto_battle.py 旧版 _infer_orientation 逻辑一致。作为
+    detect_orientation()（红像素比例启发式，玩家执黑时可能误判）的双重校验：
+    CNN 识别结果可靠时以棋盘内容为准。
+    """
+    top = board[0]
+    bot = board[9]
+    if not (all(p is not None for p in top) and all(p is not None for p in bot)):
+        return None
+    top_red = sum(1 for p in top if p.isupper())
+    bot_red = sum(1 for p in bot if p.isupper())
+    if top_red == 0 and bot_red == 9:
+        return True
+    if top_red == 9 and bot_red == 0:
+        return False
+    return None
+
+
 def board_placement(board: List[List[Optional[str]]]) -> str:
     """棋盘指纹：把 10x9 棋盘压缩成唯一字符串（供全自动对弈差分检测用）。
 
