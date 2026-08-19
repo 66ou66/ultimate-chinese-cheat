@@ -8,6 +8,14 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'xiangqi-bot'))
 
+# 兼容中文/emoji 输出（直接跑测试时 stdout 可能是 GBK，避免 ✓/✗ 打印崩溃）
+for _stream in (sys.stdout, sys.stderr):
+    if _stream is not None and hasattr(_stream, 'reconfigure'):
+        try:
+            _stream.reconfigure(encoding='utf-8', errors='replace')
+        except Exception:
+            pass
+
 from fen_utils import fen_to_board           # noqa: E402
 from xiangqi_bot import Bot                  # noqa: E402
 

@@ -142,27 +142,29 @@ class Advisor:
 
     # --- 引擎分析 ---
 
-    def analyze(self, fen):
+    def analyze(self, fen, moves=None):
         if not self.engine._initialized:
             self.engine.initialize()
         return self.engine.analyze(
             fen, depth=self.depth, movetime=self.movetime, multi_pv=self.multi_pv,
+            moves=moves,
         )
 
     # --- 一站式 ---
 
-    def run_once(self, turn):
+    def run_once(self, turn, moves=None):
         """执行一次完整识别 + 分析。
 
         Args:
             turn: 'w'=红方走 / 'b'=黑方走
+            moves: 可选，引擎着法历史（标准方向 UCI），激活循环规则。
 
         Returns:
             dict: board / playing_red / fen / turn / result
         """
         board, playing_red = self.capture_board()
         fen = self.board_to_full_fen(board, playing_red, turn)
-        result = self.analyze(fen)
+        result = self.analyze(fen, moves=moves)
         self.last = {
             'board': board,
             'playing_red': playing_red,
@@ -172,16 +174,23 @@ class Advisor:
         }
         return self.last
 
-    def run_auto(self):
+    def run_auto(self, moves=None, fen=None):
         """识别 + 分析（半自动落子用）：turn 直接由我方执哪方推导。
 
         我方执红(playing_red=True) → turn='w'；我方执黑 → turn='b'。
         与 run_once 的区别：不依赖手动维护的 turn，避免"对方走没走"的状态混乱。
+
+        Args:
+            moves: 可选，引擎着法历史（标准方向 UCI）。喂完整历史给引擎
+                   可激活长将/重复将军判负等循环规则（全自动对弈用）。
+            fen:   可选，覆盖识别生成的 FEN（全自动模式喂"已确认局面"的
+                   FEN，保证与 moves 严格一致）；None 时用识别结果生成。
         """
         board, playing_red = self.capture_board()
         turn = 'w' if playing_red else 'b'
-        fen = self.board_to_full_fen(board, playing_red, turn)
-        result = self.analyze(fen)
+        if fen is None:
+            fen = self.board_to_full_fen(board, playing_red, turn)
+        result = self.analyze(fen, moves=moves)
         self.last = {
             'board': board,
             'playing_red': playing_red,
@@ -214,11 +223,11 @@ class Advisor:
         print(f"\n✅ 人工修正完成，修正 FEN: {corrected_fen}")
         return corrected, playing_red
 
-    def run_edited_once(self, turn):
+    def run_edited_once(self, turn, moves=None):
         """识别 + 人工检验 + 分析，返回与 run_once 相同结构的结果。"""
         board, playing_red = self.capture_and_edit()
         fen = self.board_to_full_fen(board, playing_red, turn)
-        result = self.analyze(fen)
+        result = self.analyze(fen, moves=moves)
         self.last = {
             'board': board,
             'playing_red': playing_red,

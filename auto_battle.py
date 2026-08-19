@@ -48,7 +48,8 @@ from collections import deque
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from fen_utils import fen_to_board, INITIAL_FEN, infer_orientation  # noqa: E402
+from fen_utils import (fen_to_board, INITIAL_FEN, infer_orientation,  # noqa: E402
+                       board_to_fen, coord_to_uci, to_engine_board)
 from move_notation import apply_move                               # noqa: E402
 from board_diff import (diff_boards, contains_move, moves_in_diff)  # noqa: E402
 
@@ -119,6 +120,26 @@ def _apply_uci_on_screen(board, uci, playing_red):
     return [row[::-1] for row in reversed(std)]
 
 
+def _screen_move_to_uci(fy, fx, ty, tx, playing_red):
+    """屏幕方向着法 (y,x) 顺序 → 标准方向 UCI。
+
+    我方执红（红在屏幕下方）时屏幕方向 == 标准方向，直接转换；
+    我方执黑时屏幕 = 标准方向旋转 180°，坐标须映射回标准方向
+    （屏幕(y,x) ↔ 标准(9-y,8-x)，与 _apply_uci_on_screen 同一旋转约定）。
+
+    Args:
+        fy, fx, ty, tx: 屏幕方向 from/to（与 board_diff.moves_in_diff
+                        返回的 (fy, fx, ty, tx) 顺序一致）。
+        playing_red: 我方执红？
+
+    Returns:
+        标准方向 UCI，如 'b7e7'。
+    """
+    if playing_red:
+        return coord_to_uci((fx, fy), (tx, ty))
+    return coord_to_uci((8 - fx, 9 - fy), (8 - tx, 9 - ty))
+
+
 # --- 落子回读诊断格式化（人工排查 confirm_failed 用） ---
 _PIECE_CN = {
     'R': '红车', 'N': '红马', 'B': '红相', 'A': '红仕', 'K': '红帅',
@@ -173,6 +194,8 @@ class AutoBattle:
         self.max_moves = max_moves
         self.playing_red = None
         self.last_board = None       # 已确认的局面（对比基准）
+        self.start_fen = None        # 开局标准方向 FEN（含 turn，历史重放起点）
+        self.move_history = []       # 标准方向 UCI 着法历史（供引擎循环规则）
         self._recent_candidates = deque(maxlen=self.confirm_times)
         self.my_turn = False
         self.move_count = 0          # 我方已走子数（超上限保护）
@@ -198,6 +221,12 @@ class AutoBattle:
             playing_red = inferred
         self.playing_red = playing_red
         self.last_board = [row[:] for row in board]
+        # v5: 开局 FEN + 着法历史（标准方向 UCI），喂给引擎激活长将/
+        # 重复将军判负等循环规则。中途启动（红方已走若干步）时历史从空
+        # 开始、循环规则对近期循环仍生效（详见 _reconcile_history 自愈）。
+        self.start_fen = self.advisor.board_to_full_fen(
+            board, playing_red, 'w' if playing_red else 'b')
+        self.move_history = []
         # 执红（先手）→ 立即轮到我方；
         # 执黑（后手）→ 若红方已经先走一步（棋盘已偏离开局局面）则直接轮到
         # 我方，否则等待红方先走。修复"红方先动一步后再启动脚本"时脚本
@@ -247,6 +276,11 @@ class AutoBattle:
             best = max(candidates, key=lambda m: votes[m])
             if votes[best] >= self.confirm_times:
                 self.last_board = [row[:] for row in board]
+                # v5: 对方着法转标准 UCI 追加进历史（供引擎循环规则）。
+                # 未 start()（start_fen=None，如纯差分测试路径）时跳过。
+                if self.start_fen is not None:
+                    self.move_history.append(
+                        _screen_move_to_uci(*best, self.playing_red))
                 self._recent_candidates.clear()
                 self.my_turn = True
                 return True
@@ -264,6 +298,55 @@ class AutoBattle:
         piece = self.last_board[fy][fx]
         is_red_piece = bool(piece) and piece.isupper()
         return is_red_piece != self.playing_red
+
+    # --- 着法历史（v5：喂完整历史给引擎，激活循环规则） ---
+
+    def _current_turn(self):
+        """由开局 turn 与已走着法数推导当前轮到谁。"""
+        if self.start_fen is None:
+            return 'w'
+        _, meta = fen_to_board(self.start_fen)
+        start_turn = meta['turn']
+        if len(self.move_history) % 2 == 0:
+            return start_turn
+        return 'b' if start_turn == 'w' else 'w'
+
+    def _replay_board(self):
+        """把 start_fen + move_history 重放为标准方向棋盘。"""
+        board, _ = fen_to_board(self.start_fen)
+        for uci in self.move_history:
+            board = apply_move(board, uci)
+        return board
+
+    def _reconcile_history(self, board, playing_red):
+        """历史自愈：确保 start_fen+move_history 与当前局面一致。
+
+        重放局面（标准方向）与 board（屏幕方向 → 标准方向）逐格比对；
+        不一致说明历史被识别噪声污染 / 中途启动历史不全 → 丢弃历史、
+        以当前局面为起点重新累计，避免把矛盾的历史喂给引擎。
+
+        Args:
+            board: 当前已确认局面（屏幕方向）。
+            playing_red: 我方执红？
+
+        Returns:
+            True: 历史可信；False: 已重置（start_fen=当前局面, history=[]）。
+        """
+        turn = self._current_turn()
+        if self.start_fen is None:
+            self.start_fen = self.advisor.board_to_full_fen(
+                board, playing_red, turn)
+            self.move_history = []
+            return False
+        replay = self._replay_board()
+        current = to_engine_board(board, playing_red)
+        if board_to_fen(replay) != board_to_fen(current):
+            # 历史不可信 → 重置，以当前局面为起点重新累计
+            self.start_fen = self.advisor.board_to_full_fen(
+                board, playing_red, turn)
+            self.move_history = []
+            return False
+        return True
 
     # --- 我方回合：分析 + 落子 + 回读确认 ---
 
@@ -296,7 +379,16 @@ class AutoBattle:
             'board_gone': 识别质量崩溃（棋盘疑似已切换为结算界面：对手投降/超时），
                           按对局结束处理，不应再落子
         """
-        data = self.advisor.run_auto()
+        # v5: 历史自愈 + 喂完整着法历史给引擎（激活长将/重复将军判负）。
+        # 自愈后 last_board 与 start_fen+move_history 重放严格一致，故 FEN
+        # 用已确认局面生成，避免最新截图识别噪声污染喂给引擎的局面。
+        if self.last_board is not None and self.playing_red is not None:
+            self._reconcile_history(self.last_board, self.playing_red)
+            fen = self.advisor.board_to_full_fen(
+                self.last_board, self.playing_red, self._current_turn())
+        else:
+            fen = None
+        data = self.advisor.run_auto(moves=self.move_history or None, fen=fen)
         # 识别质量崩溃 = 棋盘已不在画面（对手投降/超时跳转结算界面）：
         # 此时识别出的"局面"是垃圾，绝不能据此落子，直接按对局结束处理。
         if getattr(self.advisor, 'recognition_collapsed', lambda: False)():
@@ -334,6 +426,8 @@ class AutoBattle:
                     self.last_board = [row[:] for row in expected]
                     self.my_turn = False
                     self.move_count += 1
+                    if self.start_fen is not None:
+                        self.move_history.append(uci)
                     return 'ok'
                 last_actual = d_actual
                 if not d_actual.changed:
@@ -354,6 +448,8 @@ class AutoBattle:
                     self.last_board = [row[:] for row in expected]
                     self.my_turn = False
                     self.move_count += 1
+                    if self.start_fen is not None:
+                        self.move_history.append(uci)
                     confirmed = True
                     break
                 time.sleep(0.3)

@@ -70,6 +70,10 @@ class _FakeAdvisorStart:
     def capture_board(self):
         return self.board, self.playing_red
 
+    def board_to_full_fen(self, board, playing_red, turn):
+        from fen_utils import board_to_fen, to_engine_board
+        return board_to_fen(to_engine_board(board, playing_red), turn=turn)
+
 
 def test_start_red_first():
     b1, _, _ = _boards()
@@ -78,6 +82,9 @@ def test_start_red_first():
     assert pr is True
     assert battle.my_turn is True   # 执红先手，立即走
     assert battle.last_board == b1
+    # v5: start() 初始化开局 FEN 与空历史（供引擎循环规则）
+    assert battle.start_fen == f"{FEN1} w - - 0 1"
+    assert battle.move_history == []
 
 
 def test_start_black_waits():
@@ -277,13 +284,21 @@ class _FakeAdvisor:
         self.collapsed = collapsed
         self.bot = _FakeBot()
 
-    def run_auto(self):
+    def run_auto(self, moves=None, fen=None):
         return {
             'board': self.board,
             'playing_red': self.playing_red,
             'turn': 'w' if self.playing_red else 'b',
+            'fen': fen or self.board_to_full_fen(
+                self.board, self.playing_red,
+                'w' if self.playing_red else 'b'),
+            'moves': list(moves) if moves else [],
             'result': _FakeResult(self.bestmove),
         }
+
+    def board_to_full_fen(self, board, playing_red, turn):
+        from fen_utils import board_to_fen, to_engine_board
+        return board_to_fen(to_engine_board(board, playing_red), turn=turn)
 
     def capture_board(self):
         if self.after_board is not None:
@@ -469,6 +484,79 @@ def test_infer_orientation():
     mid = [row[:] for row in b1]
     mid[9][0] = None
     assert _infer_orientation(mid) is None
+
+
+# --- v5: 着法历史 / 屏幕→标准 UCI 转换 / 历史自愈 ---
+
+def test_screen_move_to_uci_red():
+    """执红：屏幕方向 == 标准方向，着法直接转 UCI。"""
+    from auto_battle import _screen_move_to_uci
+    # 屏幕 (fy,fx,ty,tx)：红炮 b2e2 = from(x=1,y=7)→to(x=4,y=7)
+    assert _screen_move_to_uci(7, 1, 7, 4, True) == 'b2e2'
+
+
+def test_screen_move_to_uci_black():
+    """执黑：屏幕方向旋转 180°，须映射回标准方向再转 UCI。
+
+    标准黑炮 b7e7：from(x=1,y=2)→to(x=4,y=2)。
+    屏幕方向 = 标准旋转 180°：(x,y)→(8-x,9-y)，故 from(7,7)→to(4,7)。
+    """
+    from auto_battle import _screen_move_to_uci
+    assert _screen_move_to_uci(7, 7, 7, 4, False) == 'b7e7'
+
+
+def test_move_history_tracks_opponent_and_self():
+    """我方着法 + 对方着法依次追加进历史（标准 UCI），顺序正确。"""
+    b1, b2, b3 = _boards()   # b1=开局, b2=红炮平中, b3=黑炮平中
+    fake = _FakeAdvisor(b1, playing_red=True, bestmove='b2e2', after_board=b2)
+    battle = AutoBattle(fake, click_interval=0.01)
+    # 手动初始化（等价 start() 执红）：开局局面 + 空历史。
+    # 注意不能用 battle.start()：_FakeAdvisor.capture_board() 在 after_board
+    # 非空时返回 after_board，start() 会把 start_fen 设成 b2 的局面。
+    battle.playing_red = True
+    battle.last_board = [row[:] for row in b1]
+    battle.start_fen = f"{FEN1} w - - 0 1"
+    battle.move_history = []
+    battle.my_turn = True
+    patcher = _patch_pyautogui()
+    try:
+        assert battle.play_my_move(max_retries=1, max_reads=3,
+                                   wait_anim=0.01, wait_read=0.01) == 'ok'
+    finally:
+        patcher.stop()
+    assert battle.move_history == ['b2e2']   # 我方红炮平中
+    assert battle.last_board == b2
+    # 对方（黑）炮平中 b7e7 → update_board 确认后追加
+    battle.my_turn = False
+    assert battle.update_board(b3) is False
+    assert battle.update_board(b3) is True
+    assert battle.move_history == ['b2e2', 'b7e7']
+    assert battle.my_turn is True
+
+
+def test_reconcile_history_keeps_when_consistent():
+    """历史与当前局面一致 → 不重置，历史保留。"""
+    b1, b2, _ = _boards()
+    fake = _FakeAdvisor(b2, playing_red=True)
+    battle = AutoBattle(fake, confirm_times=2)
+    battle.playing_red = True
+    battle.start_fen = f"{FEN1} w - - 0 1"
+    battle.move_history = ['b2e2']     # 重放 = b2（红炮平中）
+    assert battle._reconcile_history(b2, True) is True
+    assert battle.move_history == ['b2e2']
+
+
+def test_reconcile_history_resets_on_mismatch():
+    """历史与当前局面不一致（噪声污染/中途启动）→ 重置并以当前局面为起点。"""
+    b1, b2, _ = _boards()
+    fake = _FakeAdvisor(b2, playing_red=True)
+    battle = AutoBattle(fake, confirm_times=2)
+    battle.playing_red = True
+    battle.start_fen = f"{FEN1} w - - 0 1"
+    battle.move_history = ['b2e2', 'b7e7']  # 重放 = 红+黑炮平中 ≠ 当前 b2
+    assert battle._reconcile_history(b2, True) is False
+    assert battle.move_history == []
+    assert battle.start_fen.startswith('rnbakabnr')   # 已重置为当前局面
 
 
 if __name__ == '__main__':

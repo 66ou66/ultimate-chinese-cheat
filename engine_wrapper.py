@@ -166,6 +166,7 @@ class PikafishEngine:
 
     def analyze(
         self, fen: str, depth: int = 20, movetime: int = 3000, multi_pv: int = 3,
+        moves: Optional[List[str]] = None,
     ) -> AnalysisResult:
         """发送FEN，等待引擎分析，返回结构化结果。"""
         if not self._initialized:
@@ -174,7 +175,12 @@ class PikafishEngine:
         with self._lock:
             if multi_pv > 1:
                 self._send(f'setoption name MultiPV value {multi_pv}')
-            self._send(f'position fen {fen}')
+            if moves:
+                # 喂完整着法历史：引擎据此激活长将/重复将军/长捉等循环规则
+                # （只发 position fen 时循环规则永不触发，导致被标记"长将"）
+                self._send(f'position fen {fen} moves {" ".join(moves)}')
+            else:
+                self._send(f'position fen {fen}')
 
             if depth > 0 and movetime > 0:
                 self._send(f'go depth {depth} movetime {movetime}')
