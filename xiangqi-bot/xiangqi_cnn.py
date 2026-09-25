@@ -88,7 +88,11 @@ class PieceNet(nn.Module):
 
     def forward(self, x):
         x = self.features(x)
-        x = x.view(x.size(0), -1)
+        # 用 reshape 而不是 view：view 要求特征图内存连续，而 CPU/MKLDNN 在输入为
+        # NHWC 视图（channels_last）时会输出 channels_last 特征图，此时 x.view 会抛
+        # 「view size is not compatible with input tensor's size and stride」。
+        # 输入连续时 reshape 完全等价于 view（结果与内存都一致），只有不连续时才拷贝。
+        x = x.reshape(x.size(0), -1)
         return self.classifier(x)
 
 
@@ -434,6 +438,60 @@ class PieceClassifierCNN:
         cls = CLASSES[pred]
         return (None if cls == '_' else cls), float(probs[pred]), probs
 
+    def _classify_cells_full(self, patches):
+        """批量分类多个格子（整盘一次前向传播），返回与 patches 等长的结果列表。
+
+        为什么需要批量：parse_board 要分类 10x9 = 90 个格子，若逐格调用
+        _classify_cell_full，就会做 90 次独立模型前向 + 90 次 host↔device 往返，
+        在 CPU（无 CUDA）上极慢 —— 这是 [1] 键识别慢的主因之一。此处把全部有效
+        patch 叠成一个 batch 只做一次前向。
+
+        数值一致性：模型处于 eval() 模式，BatchNorm 用运行统计量、逐样本独立，
+        因此批量推理与逐格推理结果一致（仅浮点误差级别）。
+
+        Args:
+            patches: 待分类 patch 列表（numpy BGR 图像）；无效项为 None 或过小。
+
+        Returns:
+            list[(piece_or_None, confidence, probs_or_None)]
+            下标与 patches 一一对应；无效 patch 对应项为 (None, 0.0, None)。
+        """
+        results = [(None, 0.0, None)] * len(patches)
+        valid = []
+        for i, p in enumerate(patches):
+            if p is None or p.shape[0] < 20 or p.shape[1] < 20:
+                continue
+            valid.append(i)
+        if not valid:
+            return results
+
+        # 直接按 (N, 3, H, W) 填 NCHW 连续内存：与训练时 DataLoader（torch.stack）
+        # 的排布一致，展平时也不会踩到 memory format 的坑。
+        # （若改成 NHWC 视图，CPU/MKLDNN 会输出 channels_last 特征图，那时就得依赖
+        #   PieceNet.forward 用 reshape 而不是 view，否则会直接抛 RuntimeError）
+        batch = np.empty((len(valid), 3, CELL_SIZE, CELL_SIZE), dtype=np.float32)
+        for k, i in enumerate(valid):
+            img = cv2.resize(patches[i], (CELL_SIZE, CELL_SIZE))
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+            batch[k] = img.transpose(2, 0, 1)          # HWC -> CHW
+        tensor = torch.from_numpy(batch).to(self.device)
+        # Apply same normalization as training (ImageNet stats)
+        normalize = transforms.Normalize(
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225])
+        tensor = normalize(tensor)
+
+        with torch.no_grad():
+            logits = self.model(tensor)
+            probs_all = torch.softmax(logits, dim=1).cpu().numpy()
+
+        for k, i in enumerate(valid):
+            probs = probs_all[k]
+            pred = int(probs.argmax())
+            cls = CLASSES[pred]
+            results[i] = (None if cls == '_' else cls, float(probs[pred]), probs)
+        return results
+
     def parse_board(self, img, cols_logical, rows_logical, retina_scale, win_x, win_y,
                     cell_w, cell_h, debug_dir=None, debug_prefix=None):
         """Parse entire board from a single screenshot. Returns 10x9 board array.
@@ -458,29 +516,38 @@ class PieceClassifierCNN:
                 os.makedirs(os.path.join(debug_dir, piece_dir), exist_ok=True)
 
         prefix = debug_prefix or ""
+        h, w = img.shape[:2]
 
+        # 1) 先按网格切出全部 patch（不做推理）
+        coords = []
+        patches = []
         for r in range(10):
             for c in range(9):
                 px = int((cols_logical[c] - win_x) * retina_scale)
                 py = int((rows_logical[r] - win_y) * retina_scale)
-                h, w = img.shape[:2]
                 x1, y1 = max(0, px - radius), max(0, py - radius)
                 x2, y2 = min(w, px + radius), min(h, py + radius)
-                patch = img[y1:y2, x1:x2]
+                coords.append((r, c))
+                patches.append(img[y1:y2, x1:x2])
 
-                if patch.shape[0] < 20 or patch.shape[1] < 20:
-                    continue
+        # 2) 整盘 90 格一次批量前向（详见 _classify_cells_full 的说明），
+        #    比逐格调用 _classify_cell_full 快一个数量级。
+        classified = self._classify_cells_full(patches)
 
-                piece, conf, probs = self._classify_cell_full(patch)
-                board[r][c] = piece
-                self._cell_probs[r][c] = probs
-                self._cell_patches[r][c] = patch
+        # 3) 回填结果（probs 为 None = 该 patch 无效，即越界/过小，保持空格）
+        for (r, c), patch, (piece, conf, probs) in zip(coords, patches, classified):
+            if probs is None:
+                continue
 
-                if debug_dir:
-                    label = piece if piece else '_'
-                    subdir = PIECE_TO_DIR[label]
-                    fname = f"{prefix}r{r}c{c}_{conf*100:.0f}.png"
-                    _save_img(os.path.join(debug_dir, subdir, fname), patch)
+            board[r][c] = piece
+            self._cell_probs[r][c] = probs
+            self._cell_patches[r][c] = patch
+
+            if debug_dir:
+                label = piece if piece else '_'
+                subdir = PIECE_TO_DIR[label]
+                fname = f"{prefix}r{r}c{c}_{conf*100:.0f}.png"
+                _save_img(os.path.join(debug_dir, subdir, fname), patch)
 
         self.last_corrections = 0   # 本次识别先清零，_validate_board 会写入实际修正数
         board = self._validate_board(board)

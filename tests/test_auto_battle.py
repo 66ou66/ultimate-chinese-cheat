@@ -94,6 +94,11 @@ def test_start_black_waits():
     battle = AutoBattle(_FakeAdvisorStart(screen1, False))
     battle.start()
     assert battle.my_turn is False  # 执黑后手，等待对方先走
+    # 象棋红方恒先手：红方还没走 → 开局 turn 必须是 'w'
+    # （修复前错设成 'b'，会让 _current_turn() 在红走一步后错算成 'w'，
+    #   引擎返回红方着法 → 程序点红方棋子 → 落子回读确认失败）
+    assert battle.start_fen == f"{FEN1} w - - 0 1"
+    assert battle.move_history == []
 
 
 def test_start_corrects_wrong_orientation():
@@ -119,6 +124,29 @@ def test_start_black_detects_red_already_moved():
     assert pr is False
     assert battle.my_turn is True                  # 不再卡在"等待红方"
     assert battle.last_board == screen_after_red   # 基准仍用当前确认局面
+    # 红方已先走一步 → 开局 turn='b'（轮到黑方走）
+    assert battle.start_fen.endswith(' b - - 0 1')
+
+
+def test_current_turn_black_after_red_first_move():
+    """执黑、红方走完第一步后 _current_turn() 必须返回 'b'（轮到我方黑走）。
+
+    修复前 start() 把 start_fen 的 turn 错设成 'b'，红方走完第一步后
+    _current_turn() 会错误返回 'w'，引擎按"该红方走"返回红方着法 → 程序
+    去点击红方棋子（对方棋子）→ 落子回读确认失败。这正是真实日志中
+    "执黑点红兵 (r3,c2)→(r4,c2) 后 confirm_failed" 的根因场景。
+    """
+    b1, b2, _ = _boards()          # b2 = 红炮平中（红方先走一步）
+    screen1 = [row[::-1] for row in reversed(b1)]        # 屏幕方向：红在上
+    screen_after_red = [row[::-1] for row in reversed(b2)]
+    battle = AutoBattle(_FakeAdvisorStart(screen1, False), confirm_times=2)
+    battle.start()                                       # 执黑，红方未走
+    assert battle.my_turn is False
+    assert battle.start_fen.endswith(' w - - 0 1')       # 红方未走，turn='w'
+    assert battle.update_board(screen_after_red) is False   # 第 1 帧：待确认
+    assert battle.update_board(screen_after_red) is True    # 第 2 帧：确认对方走完
+    assert battle.my_turn is True
+    assert battle._current_turn() == 'b'                 # 关键断言：轮到我方黑走
 
 
 def test_start_black_red_not_moved_single_noise():

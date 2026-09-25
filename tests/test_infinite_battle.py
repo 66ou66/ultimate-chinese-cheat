@@ -20,8 +20,10 @@ for _stream in (sys.stdout, sys.stderr):
             pass
 
 from fen_utils import fen_to_board                        # noqa: E402
+from move_notation import apply_move                      # noqa: E402
 from infinite_battle import (ClickPointStore, click_sequence,  # noqa: E402
-                             play_one_game, run_infinite_battle)
+                             is_opening_board, play_one_game,
+                             run_infinite_battle, wait_for_opening)
 
 FEN1 = 'rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR'
 
@@ -240,6 +242,167 @@ def test_run_infinite_battle_no_points():
             status = run_infinite_battle(advisor, store, restart_wait=0,
                                          clicker=lambda x, y: None)
         assert status == 'no_points'
+    finally:
+        shutil.rmtree(tmp)
+
+
+# --- is_opening_board（续局时判断「新局是否已就绪」）---
+
+def _opening_board():
+    """标准开局棋盘（红在下、屏幕方向与标准一致）。"""
+    b, _ = fen_to_board(FEN1)
+    return b
+
+
+def _midgame_board():
+    """比开局差 8 格（4 步：双炮 + 两兵）的中盘局面：应被 is_opening_board 拒绝。
+
+    注意 UCI rank 从红方底线算起（红兵在 rank 3 → y=6），
+    写错 rank 会搬到空格上导致步数不生效。
+    """
+    b = _opening_board()
+    for uci in ('b2e2', 'b7e7', 'a3a4', 'c3c4'):
+        b = apply_move(b, uci)
+    return b
+
+
+def test_is_opening_board_initial():
+    assert is_opening_board(_opening_board()) is True
+
+
+def test_is_opening_board_rotated():
+    """黑方视角：开局棋盘 180° 旋转（红在上）同样视为已就绪。"""
+    b = _opening_board()
+    assert is_opening_board([row[::-1] for row in reversed(b)]) is True
+
+
+def test_is_opening_board_red_first_move():
+    """执黑时红方已先走一步（差 2 格）→ 仍在容忍范围内。"""
+    b = apply_move(_opening_board(), 'b2e2')
+    assert is_opening_board(b) is True
+
+
+def test_is_opening_board_noise():
+    """CNN 识别噪声（开局棋盘上随机多几个杂格）→ 容忍。"""
+    b = _opening_board()
+    b[5][5] = 'P'
+    b[4][7] = 'p'
+    assert is_opening_board(b) is True
+
+
+def test_is_opening_board_rejects_midgame():
+    """中盘/终局局面与开局差几十格 → 判定未就绪（避免把结算界面当新局）。"""
+    assert is_opening_board(_midgame_board()) is False
+
+
+# --- wait_for_opening（点击「再来一局」后轮询直到开局就绪）---
+
+class _WaitAdvisor:
+    """按顺序返回预设棋盘；超出后一直返回最后一个。"""
+
+    def __init__(self, boards):
+        self._boards = boards
+        self.calls = 0
+        self.last = None
+
+    def capture_board(self):
+        if self.calls < len(self._boards):
+            self.last = [row[:] for row in self._boards[self.calls]]
+            self.calls += 1
+        return [row[:] for row in self.last], True
+
+
+class _FailThenOkAdvisor:
+    """前 fail_count 次 capture_board 抛异常（窗口/识别异常），之后返回开局棋盘。"""
+
+    def __init__(self, fail_count=2, board=None):
+        self.fail_count = fail_count
+        self.board = board if board is not None else _opening_board()
+
+    def capture_board(self):
+        if self.fail_count > 0:
+            self.fail_count -= 1
+            raise RuntimeError('窗口不可见（测试用）')
+        return [row[:] for row in self.board], True
+
+
+def test_wait_for_opening_ok():
+    """先识别到终局界面，再识别到开局棋盘 → 'ok'。"""
+    advisor = _WaitAdvisor([_midgame_board(), _midgame_board(), _opening_board()])
+    with mock.patch('infinite_battle.poll_stop', return_value=False), \
+            mock.patch('time.sleep'):
+        state = wait_for_opening(advisor, restart_wait=10, retries=3)
+    assert state == 'ok'
+
+
+def test_wait_for_opening_timeout():
+    """始终识别不到开局棋盘 → 超时 'timeout'。"""
+    advisor = _WaitAdvisor([_midgame_board()])
+    with mock.patch('infinite_battle.poll_stop', return_value=False), \
+            mock.patch('time.sleep'):
+        state = wait_for_opening(advisor, restart_wait=0, retries=2)
+    assert state == 'timeout'
+
+
+def test_wait_for_opening_stopped():
+    """等待期间按下 ` 键 → 立即取消 'stopped'。"""
+    advisor = _WaitAdvisor([_midgame_board()])
+    with mock.patch('infinite_battle.poll_stop', return_value=True), \
+            mock.patch('time.sleep'):
+        state = wait_for_opening(advisor, restart_wait=10, retries=3)
+    assert state == 'stopped'
+
+
+def test_wait_for_opening_tolerates_recognition_error():
+    """截屏/识别异常不中断等待（视为还没就绪），恢复后立即放行。"""
+    advisor = _FailThenOkAdvisor()
+    with mock.patch('infinite_battle.poll_stop', return_value=False), \
+            mock.patch('time.sleep'):
+        state = wait_for_opening(advisor, restart_wait=10, retries=3)
+    assert state == 'ok'
+
+
+# --- run_infinite_battle：续局必须先等开局就绪（回归测试）---
+
+def test_run_infinite_battle_reclicks_on_opening_timeout():
+    """点击「再来一局」后 wait_for_opening 超时 → 重新点击坐标序列再等（而非退出）。"""
+    _FakeBattleLoop.starts = 0
+    store, tmp = _make_store()
+    clicked = []
+    try:
+        store.add_point(100, 200)
+        store.set_interval(0)
+        advisor = _FakeAdvisor(_no_red_board())
+        calls = {'n': 0}
+
+        def _wfo(*args, **kwargs):
+            calls['n'] += 1
+            return 'timeout' if calls['n'] == 1 else 'ok'
+
+        with mock.patch('auto_battle.AutoBattle', _FakeBattleLoop), \
+                mock.patch('infinite_battle.wait_for_opening', side_effect=_wfo):
+            status = run_infinite_battle(advisor, store, restart_wait=0,
+                                         clicker=lambda x, y: clicked.append((x, y)))
+        assert status == 'restart_failed'        # 第 3 次 battle.start() 失败（测试桩）
+        # 第 1 局结束点击 1 次 → 超时重新点击 1 次 → 第 2 局结束点击 1 次
+        assert clicked == [(100, 200), (100, 200), (100, 200)]
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_run_infinite_battle_restart_cancelled_by_backtick():
+    """等开局期间按 ` 键 → 取消续局退出（返回 'stopped'）。"""
+    _FakeBattleLoop.starts = 0
+    store, tmp = _make_store()
+    try:
+        store.add_point(100, 200)
+        store.set_interval(0)
+        advisor = _FakeAdvisor(_no_red_board())
+        with mock.patch('auto_battle.AutoBattle', _FakeBattleLoop), \
+                mock.patch('infinite_battle.wait_for_opening', return_value='stopped'):
+            status = run_infinite_battle(advisor, store, restart_wait=0,
+                                         clicker=lambda x, y: None)
+        assert status == 'stopped'
     finally:
         shutil.rmtree(tmp)
 

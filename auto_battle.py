@@ -221,20 +221,25 @@ class AutoBattle:
             playing_red = inferred
         self.playing_red = playing_red
         self.last_board = [row[:] for row in board]
+        # 先确定轮次，再据此设置开局 turn（象棋红方恒先手）：
+        #   执红 → 我方红先走(turn='w')
+        #   执黑 → 红方未走仍轮红(turn='w')；红方已先走一步则轮黑(turn='b')
+        # 修复 v5 中"执黑时 start_fen 的 turn 一律写死 'b'"：那会让
+        # _current_turn() 在红方走完第一步后错误返回 'w'（应为 'b'），
+        # 引擎按"该红方走"返回红方着法 → 程序把红方棋子当黑子点击 →
+        # 落子回读确认失败（执黑必现的 confirm_failed）。
+        if playing_red:
+            self.my_turn = True
+            start_turn = 'w'
+        else:
+            self.my_turn = _red_already_moved(board, playing_red)
+            start_turn = 'b' if self.my_turn else 'w'
         # v5: 开局 FEN + 着法历史（标准方向 UCI），喂给引擎激活长将/
         # 重复将军判负等循环规则。中途启动（红方已走若干步）时历史从空
         # 开始、循环规则对近期循环仍生效（详见 _reconcile_history 自愈）。
         self.start_fen = self.advisor.board_to_full_fen(
-            board, playing_red, 'w' if playing_red else 'b')
+            board, playing_red, start_turn)
         self.move_history = []
-        # 执红（先手）→ 立即轮到我方；
-        # 执黑（后手）→ 若红方已经先走一步（棋盘已偏离开局局面）则直接轮到
-        # 我方，否则等待红方先走。修复"红方先动一步后再启动脚本"时脚本
-        # 卡在等待、需手动走一步才能继续的问题。
-        if playing_red:
-            self.my_turn = True
-        else:
-            self.my_turn = _red_already_moved(board, playing_red)
         return board, playing_red
 
     # --- 差分检测（等待对方时每轮调用）---

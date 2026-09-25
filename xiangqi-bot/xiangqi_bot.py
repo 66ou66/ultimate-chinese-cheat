@@ -28,6 +28,75 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CALIB_PATH = os.path.join(_SCRIPT_DIR, "calib.json")
 TEMPLATE_DIR = os.path.join(_SCRIPT_DIR, "templates")
 
+# --- Win32 常量（截图前把窗口提到 Z 序最前用，仅 Windows）---
+SW_RESTORE = 9          # ShowWindow：还原最小化
+HWND_TOPMOST = -1       # SetWindowPos：置顶（用于绕过前台锁）
+HWND_NOTOPMOST = -2     # SetWindowPos：取消置顶（立刻还原，避免永久霸屏）
+SWP_NOSIZE = 0x0001
+SWP_NOMOVE = 0x0002
+SWP_NOACTIVATE = 0x0010
+SWP_SHOWWINDOW = 0x0040
+
+# --- 窗口匹配（区分「天天象棋」游戏窗口 vs 助手自身控制台）---
+# 天天象棋 PC 客户端窗口类名（最精确判据）
+GAME_WINDOW_CLASS = 'QQChess'
+# 助手自身窗口标题里必定出现的关键词：控制台/启动器标题叫「启动象棋外挂助手」，
+# 它含「象棋」二字，若不排除就会被 find_window 误当游戏窗口 —— 这正是
+# [1] 键手动识别整盘错乱（截到控制台画面）的根因。
+ASSISTANT_TITLE_MARKERS = ('外挂', '助手')
+
+# 窗口匹配诊断（排查「选错窗口」用）：默认关闭。
+# 置环境变量 XIANGQI_DEBUG_WINDOWS=1 后，find_window 会打印所有候选窗口的
+# 标题与类名，一眼看出究竟选中游戏窗口还是助手控制台。
+WINDOW_DEBUG = os.environ.get('XIANGQI_DEBUG_WINDOWS') == '1'
+
+
+def is_assistant_window(title):
+    """标题是否属于助手自身的控制台/启动器窗口（如「启动象棋外挂助手」）。
+
+    这类窗口标题含「象棋」，必须从游戏窗口候选里排除，否则 [1] 键手动识别时
+    （控制台正在前台、Z 序靠前）会把它截下来当棋盘。
+    """
+    if not title:
+        return False
+    return any(marker in title for marker in ASSISTANT_TITLE_MARKERS)
+
+
+def rank_xiangqi_windows(entries):
+    """从候选窗口里挑出天天象棋游戏窗口（纯函数，便于单测）。
+
+    参数：
+        entries: 可迭代的 ``(title, class_name)`` 序列，顺序即枚举顺序
+                 （Windows 下 pygetwindow 按 Z 序返回，前台窗口在前）。
+
+    返回：
+        ``(index, label)`` —— 最佳候选的下标与显示用标签；无匹配返回 ``(None, None)``。
+
+    匹配优先级（数字越小越优先）：
+        0 - ``class_name == 'QQChess'``（天天象棋 PC 客户端，最精确）
+        1 - ``title`` 含「天天象棋」
+        2 - ``title`` 含「象棋」（兼容其它象棋客户端，如微信小程序窗口）
+    约束：任何 ``title`` 含「外挂」/「助手」的窗口（助手自身控制台）一律排除。
+    """
+    best = None   # (priority, index, label)
+    for index, entry in enumerate(entries):
+        title = entry[0] or ''
+        class_name = entry[1] or ''
+        if class_name == GAME_WINDOW_CLASS:
+            priority, label = 0, '天天象棋(%s)' % GAME_WINDOW_CLASS
+        elif '天天象棋' in title and not is_assistant_window(title):
+            priority, label = 1, title
+        elif '象棋' in title and not is_assistant_window(title):
+            priority, label = 2, title
+        else:
+            continue
+        if best is None or priority < best[0]:
+            best = (priority, index, label)
+    if best is None:
+        return None, None
+    return best[1], best[2]
+
+
 # Initial board layouts (screen space)
 INIT_RED = [
     ['r','n','b','a','k','a','b','n','r'],
@@ -99,29 +168,83 @@ class Bot:
         print(f"  找到窗口({title}): ({self.win_x},{self.win_y}) "
               f"{self.win_w}x{self.win_h}")
 
-    def find_window(self):
-        """Find TiantianXiangqi window on Windows."""
-        windows = gw.getWindowsWithTitle('')
-        for w in windows:
-            if hasattr(w, '_hWnd'):
-                cn = ctypes.create_unicode_buffer(256)
-                ctypes.windll.user32.GetClassNameW(w._hWnd, cn, 256)
-                if cn.value == 'QQChess':
-                    self.win_hwnd = w._hWnd
-                    self.win_x, self.win_y = w.left, w.top
-                    self.win_w, self.win_h = w.width, w.height
-                    self._announce_window('天天象棋(QQChess)')
-                    return
-        for w in windows:
-            if not hasattr(w, '_hWnd') or not hasattr(w, 'title'):
+    def _collect_window_candidates(self):
+        """枚举所有带 ``_hWnd`` 的窗口，返回 ``[(win, title, class_name), ...]``。
+
+        顺序沿用 pygetwindow 的 Z 序（前台窗口在前）。取类名要走 Win32
+        ``GetClassNameW``，故只在 Windows 下有效。
+        """
+        candidates = []
+        for w in gw.getWindowsWithTitle(''):
+            if not hasattr(w, '_hWnd'):
                 continue
-            if '天天象棋' in w.title or '象棋' in w.title:
-                self.win_hwnd = w._hWnd
-                self.win_x, self.win_y = w.left, w.top
-                self.win_w, self.win_h = w.width, w.height
-                self._announce_window(w.title)
-                return
-        raise RuntimeError("未找到天天象棋窗口，请确认游戏已打开！")
+            cn = ctypes.create_unicode_buffer(256)
+            ctypes.windll.user32.GetClassNameW(w._hWnd, cn, 256)
+            candidates.append((w, getattr(w, 'title', '') or '', cn.value))
+        return candidates
+
+    def find_window(self):
+        """查找天天象棋游戏窗口（排除助手自身的控制台/启动器窗口）。
+
+        判别逻辑见 ``rank_xiangqi_windows``：类名 ``QQChess`` > 标题含「天天象棋」
+        > 标题含「象棋」，且标题含「外挂」/「助手」的助手自身窗口一律排除。
+        """
+        candidates = self._collect_window_candidates()
+        entries = [(title, class_name) for (_w, title, class_name) in candidates]
+
+        if WINDOW_DEBUG:
+            print(f"  [窗口候选] 共 {len(entries)} 个:")
+            for i, (title, class_name) in enumerate(entries):
+                if title or class_name:
+                    print(f"    #{i} 标题={title!r} 类名={class_name!r}")
+
+        index, label = rank_xiangqi_windows(entries)
+        if index is None:
+            raise RuntimeError("未找到天天象棋窗口，请确认游戏已打开！")
+
+        w = candidates[index][0]
+        self.win_hwnd = w._hWnd
+        self.win_x, self.win_y = w.left, w.top
+        self.win_w, self.win_h = w.width, w.height
+        self._announce_window(label)
+
+    def bring_window_to_front(self):
+        """截图前把游戏窗口提到 Z 序最前，避免被别的窗口遮挡。返回是否执行成功。
+
+        为什么需要：
+        screenshot_for_processing() 用 mss.grab() 截的是【屏幕坐标区域】，而不是
+        窗口本身 —— 谁叠在那个区域上就截到谁。手动识别（[1] 键）是在控制台里按的，
+        此刻控制台正是前台窗口、很可能正好压在游戏窗口的截图区域上，于是截到的是
+        控制台文字，CNN 会对每个格子都"自信地"读出一个棋子 → 整盘识别错乱。
+        自动落子（[6] 键）每次点击前都调用 auto_player._activate_window() 把游戏
+        抬到前台，所以同一套校准下识别正常 —— 差异就在这一步。
+
+        实现要点：
+        1. 先判 GetForegroundWindow()：游戏已是前台窗口就不可能被遮挡，直接返回，
+           零开销且完全不影响已经正常的自动落子路径。
+        2. 不是前台时用「先置顶(HWND_TOPMOST) → 立刻取消置顶(HWND_NOTOPMOST)」的
+           组合拳把窗口抬到最前：HWND_TOPMOST 能绕过前台锁（同 auto_player 的
+           做法），紧接着 NOTOPMOST 还原，避免窗口永久霸屏。
+        3. 全程不调用 SetForegroundWindow，配合 SWP_NOACTIVATE 不抢键盘焦点，
+           用户仍可在控制台继续按键。
+        """
+        hwnd = getattr(self, 'win_hwnd', None)
+        if not hwnd or os.name != 'nt':
+            return False
+        try:
+            user32 = ctypes.windll.user32
+            if user32.GetForegroundWindow() == hwnd:
+                return True   # 已是前台窗口 → 不可能被遮挡，无需改动 Z 序
+            user32.ShowWindow(hwnd, SW_RESTORE)
+            flags = SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE
+            user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags)
+            user32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, flags)
+            # 等窗口管理器完成 Z 序切换，否则可能截到切换中的画面
+            time.sleep(0.1)
+            return True
+        except Exception as e:
+            print(f"  [警告] 游戏窗口前置失败（继续截图）: {e}")
+            return False
 
     def screenshot_for_processing(self):
         """Capture window using mss (Windows)."""
