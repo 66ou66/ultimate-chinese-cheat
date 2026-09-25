@@ -28,6 +28,11 @@ from infinite_battle import (ClickPointStore, get_cursor_pos,  # noqa: E402
                              move_mouse, run_infinite_battle)
 from ai_settings import FIELDS, get_settings, reset_settings, save_settings  # noqa: E402
 from auto_mode_settings import get_interval, save_interval            # noqa: E402
+from window_settings import (GRID_STEP, MIN_COLS, MIN_ROWS, STEP,  # noqa: E402
+                             apply_window_settings, get_console_grid,
+                             get_console_rect, reset_window_settings,
+                             save_window_settings, set_console_pos,
+                             set_console_size)
 
 # 兼容中文/emoji 输出：强制 stdout/stderr 使用 UTF-8，避免 GBK 控制台打印 ⚔/✅/⏳ 等字符崩溃
 for _stream in (sys.stdout, sys.stderr):
@@ -796,8 +801,132 @@ def ai_settings_menu(explainer=None):
             explainer._refresh()
 
 
+# ===== 窗口设置菜单（主菜单按 [8] 进入）=====
+
+def _print_console_state(x, y, cols, rows):
+    """在同一行刷新显示控制台窗口的位置/大小（避免刷屏）。
+
+    位置是物理像素屏幕坐标；大小是字符行列（列 × 行）——控制台窗口的可见
+    大小只能落在字符网格上，用行列表达才和实际操作一一对应。
+    """
+    print(f"    当前位置 ({x}, {y})  大小 {cols}列×{rows}行", end='\r', flush=True)
+
+
+def window_settings_menu():
+    """窗口设置（主菜单按 [8] 进入）：调整启动时的黑色控制台窗口。
+
+    直接作用于当前控制台窗口，调整即时可见；回车保存到 window_settings.json，
+    下次启动 main_merged.py 时自动套用（见 apply_window_settings）。
+
+    位置按像素移动（SetWindowPos）；大小按字符行列调整——控制台窗口的可见大小
+    只能是字符网格的整数倍。优先用 SetConsoleScreenBufferSize +
+    SetConsoleWindowInfo（老式 conhost 精度最好），但 Windows Terminal / 新版
+    conhost 会忽略后者（只动滚动条、边框不动），此时自动退回用 SetWindowPos
+    按实测字符单元格像素改窗口边框（见 window_settings.set_console_size）。
+
+    按键：
+      [方向键]        移动窗口位置（每步 STEP 像素，长按可连续移动）
+      [Shift+方向键]  调整窗口大小（←→ 改列数，↑↓ 改行数，每步 GRID_STEP 列/行）
+      [回车]          保存当前窗口位置和大小
+      [R]             恢复默认（清除保存，下次启动不再强制窗口）
+      [Q] / [`]       返回主菜单（`` ` `` 为全局紧急退出键）
+    """
+    rect = get_console_rect()
+    grid = get_console_grid()
+    if rect is None or grid is None:
+        print("\n  ⚠ 无法获取控制台窗口信息（需在 Windows 控制台窗口中运行）。")
+        return
+    x, y = rect[0], rect[1]
+    cols, rows = grid[0], grid[1]
+
+    print("\n" + "=" * 52)
+    print("  窗口设置（调整启动时的黑色控制台窗口）")
+    print("=" * 52)
+    print(f"  【方向键】        移动窗口位置（每步 {STEP}px，长按可连续移动）")
+    print(f"  【Shift+方向键】  调整窗口大小（←→ 改列数，↑↓ 改行数，每步 {GRID_STEP} 列/行）")
+    print("  【回车】          保存当前位置和大小（下次启动自动套用）")
+    print("  【R】             恢复默认（清除保存，下次启动不强制窗口）")
+    print("  【Q】/【`】       返回主菜单")
+    print("=" * 52)
+    _print_console_state(x, y, cols, rows)
+
+    while True:
+        key = _read_arrow_key()
+        if key == '`':
+            print("\n  ` 已返回主菜单。")
+            return
+        if key in ('q', '\x1b'):
+            print("\n  Q 已返回主菜单。")
+            return
+        if key == '\r':
+            save_window_settings(x, y, cols, rows)
+            print(f"\n  ✅ 已保存窗口位置 ({x}, {y})、大小 {cols}列×{rows}行（下次启动自动套用）。")
+            _print_console_state(x, y, cols, rows)
+            continue
+        if key == 'r':
+            if reset_window_settings():
+                print("\n  ✅ 已恢复默认（清除保存，下次启动不再强制窗口位置和大小）。")
+            else:
+                print("\n  ✅ 当前已是默认（没有保存过窗口设置）。")
+            _print_console_state(x, y, cols, rows)
+            continue
+        if key not in ('up', 'down', 'left', 'right'):
+            if key is not None:
+                print(f"\n  '{key}' 无效：请用【方向键】移动 / 【Shift+方向键】改大小 / "
+                      "【回车】保存 / 【R】默认 / 【Q】返回")
+                _print_console_state(x, y, cols, rows)
+            continue
+
+        if _shift_pressed():
+            # Shift+方向键：调整窗口大小（字符行列；缩小时不越过最小行列下限）
+            if key == 'left':
+                cols -= GRID_STEP
+            elif key == 'right':
+                cols += GRID_STEP
+            elif key == 'up':
+                rows -= GRID_STEP
+            else:
+                rows += GRID_STEP
+            cols = max(MIN_COLS, cols)
+            rows = max(MIN_ROWS, rows)
+            if not set_console_size(cols, rows):
+                # 超出屏幕可容纳的行列（或系统拒绝）：回读真实值并继续，不退出菜单
+                grid = get_console_grid()
+                if grid is not None:
+                    cols, rows = grid[0], grid[1]
+                print(f"\n  ⚠ 无法继续调整窗口大小（已达当前屏幕/终端的尺寸极限），"
+                      f"保持 {cols}列×{rows}行。")
+                _print_console_state(x, y, cols, rows)
+                continue
+            # 读回真实行列：系统会按当前字体/屏幕再校准一次
+            grid = get_console_grid()
+            if grid is not None:
+                cols, rows = grid[0], grid[1]
+        else:
+            # 方向键：移动窗口位置（像素）
+            if key == 'up':
+                y -= STEP
+            elif key == 'down':
+                y += STEP
+            elif key == 'left':
+                x -= STEP
+            else:
+                x += STEP
+            if not set_console_pos(x, y):
+                print("\n  ⚠ 移动窗口失败（无法控制控制台窗口），已退出窗口设置。")
+                return
+        # 读回真实位置：系统会把窗口 clamp 到屏幕范围内
+        rect = get_console_rect()
+        if rect is not None:
+            x, y = rect[0], rect[1]
+        _print_console_state(x, y, cols, rows)
+
+
 def main():
     os.system('')  # 启用 Windows 终端 ANSI 颜色
+
+    # 套用上次用 [8] 保存的窗口位置/大小（无记录或已恢复默认时不做任何事）
+    apply_window_settings()
 
     print("=" * 52)
     print("  中国象棋 AI 助手（截屏识别 + Pikafish 引擎）")
@@ -824,6 +953,7 @@ def main():
     print("  [3]     识别 + 人工修正 + 分析")
     print("  [4]     自动识别模式（每 x 秒识别+建议，[5]暂停，[X]设间隔）")
     print("  [5]     校验管理（多棋盘模板：添加/选择/删除/重命名/重新校验）")
+    print("  [8]     窗口设置（方向键调位置，Shift+方向键调大小，下次启动自动套用）")
     print("  [9]     AI 解说设置（API 密钥/地址/模型/超时/随机性/max_tokens）")
     print("  [6]     无限全自动对战（对局结束自动点坐标续局，[1~4] 配置坐标）")
     print("  [`]     全局紧急退出键：自动/识别/校验/编辑中随时按它返回主菜单")
@@ -871,6 +1001,9 @@ def main():
         elif key == '5':
             print("5 - 校验功能（棋盘模板管理）...")
             calib_manage()
+        elif key == '8':
+            print("8 - 窗口设置...")
+            window_settings_menu()
         elif key == '9':
             print("9 - AI 解说设置...")
             ai_settings_menu(explainer)
@@ -888,7 +1021,7 @@ def main():
             print(f"  E - 已切换为{mode}（出建议后{'自动' if state['auto_explain'] else '不自动'}调 AI 解说）")
         else:
             if key is not None:
-                print(f"'{key}' 无效，请按 9 / 6 / 1 / 3 / 4 / 5 / R / B / 2 / E / Q")
+                print(f"'{key}' 无效，请按 9 / 8 / 6 / 1 / 3 / 4 / 5 / R / B / 2 / E / Q")
 
     advisor.close()
 

@@ -32,14 +32,13 @@ _PIECE_SYMBOLS = {
     'r': '车', 'n': '马', 'b': '象', 'a': '士', 'k': '将', 'c': '炮', 'p': '卒',
 }
 
-# 多帧投票识别默认参数（[1] 键识别用）：连续截 N 帧后逐格累加 CNN 概率分布
-# 再取最大，滤掉单帧偶发误判（棋子认错 / 放错位置）。
-# 提速说明（[1] 键此前明显偏慢的根因）：CNN 识别已改为「整盘 90 格一次批量
-# 前向」（见 PieceClassifierCNN._classify_cells_full），单帧 CNN 成本减半；
-# 再叠加帧数 5→3、间隔 0.12→0.05 秒（仍保留投票去噪：每格 3 票取多数即可压掉
-# 单帧偶发误判），[1] 键整段识别耗时实测约降到原先的 1/3。
-VOTE_FRAMES = 3        # 帧数（奇数，"多数"更容易胜出）
-VOTE_INTERVAL = 0.05   # 相邻两帧间隔（秒）
+# 多帧投票识别默认参数（[1] 键识别用）。capture_board_voted 仍支持传 frames>1
+# 做逐格投票去噪，但默认帧数定为 1：只在画面静止时按 [1]，无需多帧投票避开
+# 走子动画，单帧即可（CNN 已改为「整盘 90 格一次批量前向」，见
+# PieceClassifierCNN._classify_cells_full；帧数 3→1 后识别端耗时约再降到 1/3）。
+# 若日后需要多帧去噪，把 VOTE_FRAMES 调回 3 即可（奇数，"多数"更稳）。
+VOTE_FRAMES = 1        # 帧数（1=单帧识别，最快；改回 3 可恢复投票去噪）
+VOTE_INTERVAL = 0.05   # 相邻两帧间隔（秒，仅 frames>1 时生效）
 
 # 多帧投票识别诊断（排查「[1] 键整盘识别错乱」用）：默认关闭。
 # 置环境变量 XIANGQI_DEBUG_VOTE=1 后，capture_board_voted 会：
@@ -166,7 +165,7 @@ class Advisor:
         相同则优先"有子"。整体思路与 auto_battle 的多帧投票一致。
 
         Args:
-            frames:   截屏帧数（默认 VOTE_FRAMES）。
+            frames:   截屏帧数（默认 VOTE_FRAMES=1 即单帧；>1 时逐格投票去噪）。
             interval: 相邻两帧间隔秒数（默认 VOTE_INTERVAL）。
 
         Returns:

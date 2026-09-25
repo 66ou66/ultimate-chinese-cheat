@@ -218,7 +218,7 @@ def test_voted_frames_one_is_single_shot():
 
 def test_voted_default_params_are_wired():
     """默认参数取自模块常量 VOTE_FRAMES / VOTE_INTERVAL。"""
-    assert VOTE_FRAMES >= 3 and VOTE_FRAMES % 2 == 1, "默认帧数应为奇数"
+    assert VOTE_FRAMES == 1, "默认应为单帧识别（用户只在静止局面按 [1]）"
     assert VOTE_INTERVAL > 0
     base = _opening()
     advisor = _advisor([_frame(base) for _ in range(VOTE_FRAMES)])
