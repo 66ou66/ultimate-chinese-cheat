@@ -508,10 +508,10 @@ def test_infer_orientation():
     # 旋转 180°：顶行全红、底行全黑 → 我方执黑
     flipped = [row[::-1] for row in reversed(b1)]
     assert _infer_orientation(flipped) is False
-    # 中盘（底行缺子）→ None（沿用已锁定方向，防误判翻转）
+    # 中盘（底行缺子）→ 将/帅九宫兜底判向，红帅在下方 → 我方执红
     mid = [row[:] for row in b1]
     mid[9][0] = None
-    assert _infer_orientation(mid) is None
+    assert _infer_orientation(mid) is True
 
 
 # --- v5: 着法历史 / 屏幕→标准 UCI 转换 / 历史自愈 ---

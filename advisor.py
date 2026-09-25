@@ -133,11 +133,12 @@ class Advisor:
             self.bot.cell_w,
             self.bot.cell_h,
         )
-        # 方向双重校验：detect_orientation() 只靠"红像素比例"，玩家执黑时
-        # （红在屏幕上方）可能误判为执红，导致整盘 180° 翻转、引擎乱指导。
-        # 开局局面（顶/底行整列满子）用棋子颜色可靠校验，不一致则以棋盘
-        # 内容为准（与 auto_battle.AutoBattle.start() 的双重确认一致）；
-        # 中盘返回 None 时沿用已锁定方向，不做覆盖。
+        # 方向双重校验：detect_orientation() 只靠"红像素比例"，中盘（尤其玩家
+        # 执黑、红在屏幕上方）可能误判为执红，导致整盘 180° 翻转、引擎乱指导
+        # （着法列号与进退方向全部镜像）。
+        # 开局局面用顶/底行整列满子判色；中盘则用将/帅九宫位置（帅恒在 y=7..9、
+        # 将恒在 y=0..2）兜底，均以棋盘内容为准（与 auto_battle.AutoBattle.start()
+        # 的双重确认一致）；仅当两将帅同侧/缺失（返回 None）时沿用已锁定方向。
         inferred = infer_orientation(board)
         if inferred is not None and inferred != self.bot.playing_red:
             self.bot.playing_red = inferred

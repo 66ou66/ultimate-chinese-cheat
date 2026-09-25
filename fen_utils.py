@@ -129,26 +129,50 @@ def to_engine_board(board, playing_red):
 
 
 def infer_orientation(board):
-    """开局局面（顶/底行整列满子）时，从棋子颜色可靠推断玩家执红/执黑。
+    """从棋盘内容可靠推断玩家执红/执黑（开局与中盘均可用）。
 
-    顶行全为黑（小写）、底行全为红（大写） → 红在屏幕下方 → 玩家执红(True)；
-    顶行全为红、底行全为黑 → 红在屏幕上方 → 玩家执黑(False)；
-    非标准开局（中盘/顶底行有缺子）→ 返回 None，沿用已锁定方向，避免中盘误判。
+    第一优先——标准开局判色（顶/底行整列满子）：
+      顶行全为黑（小写）、底行全为红（大写） → 红在屏幕下方 → 玩家执红(True)；
+      顶行全为红、底行全为黑 → 红在屏幕上方 → 玩家执黑(False)。
 
-    说明：与 auto_battle.py 旧版 _infer_orientation 逻辑一致。作为
-    detect_orientation()（红像素比例启发式，玩家执黑时可能误判）的双重校验：
-    CNN 识别结果可靠时以棋盘内容为准。
+    第二优先——将/帅九宫位置兜底（中盘也可用）：
+      将('k')/帅('K')受九宫限制，帅恒在 y=7..9（下方）、将恒在 y=0..2（上方）；
+      180° 镜像局面则相反。据此可在顶/底行已被吃子破坏后仍稳定判向，
+      修复"detect_orientation() 中盘误判后无法纠正"导致的整盘 180° 镜像
+      （引擎着法/中文记谱列号与进退方向全部镜像）。
+
+    两将帅同侧、或棋盘无将帅（识别缺失）→ 返回 None，沿用已锁定方向。
     """
     top = board[0]
     bot = board[9]
-    if not (all(p is not None for p in top) and all(p is not None for p in bot)):
+    if all(p is not None for p in top) and all(p is not None for p in bot):
+        top_red = sum(1 for p in top if p.isupper())
+        bot_red = sum(1 for p in bot if p.isupper())
+        if top_red == 0 and bot_red == 9:
+            return True
+        if top_red == 9 and bot_red == 0:
+            return False
+
+    # 中盘兜底：由将/帅所在九宫判定方向
+    red_king_row = None
+    black_king_row = None
+    for y in range(10):
+        for x in range(9):
+            piece = board[y][x]
+            if piece == 'K':
+                red_king_row = y
+            elif piece == 'k':
+                black_king_row = y
+    if red_king_row is not None and black_king_row is not None:
+        if red_king_row >= 7 and black_king_row <= 2:
+            return True
+        if red_king_row <= 2 and black_king_row >= 7:
+            return False
         return None
-    top_red = sum(1 for p in top if p.isupper())
-    bot_red = sum(1 for p in bot if p.isupper())
-    if top_red == 0 and bot_red == 9:
-        return True
-    if top_red == 9 and bot_red == 0:
-        return False
+    if red_king_row is not None:
+        return True if red_king_row >= 7 else (False if red_king_row <= 2 else None)
+    if black_king_row is not None:
+        return True if black_king_row <= 2 else (False if black_king_row >= 7 else None)
     return None
 
 

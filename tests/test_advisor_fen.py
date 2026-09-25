@@ -86,14 +86,14 @@ def test_infer_orientation():
     # 屏幕方向（红在上，玩家执黑）→ 执黑
     screen = [row[::-1] for row in reversed(standard)]
     assert infer_orientation(screen) is False
-    # 中盘：顶行缺子 → 不判断（沿用已锁定方向）
+    # 中盘：顶行缺子 → 用将/帅九宫位置兜底，红帅在下方 → 执红
     mid = [row[:] for row in standard]
     mid[0][0] = None
-    assert infer_orientation(mid) is None
-    # 非标准开局：底行混入黑子 → 不判断
+    assert infer_orientation(mid) is True
+    # 底行混入黑子（识别噪声）→ 将/帅仍可判向 → 执红
     messy = [row[:] for row in standard]
     messy[9][0] = 'r'
-    assert infer_orientation(messy) is None
+    assert infer_orientation(messy) is True
 
 
 def test_black_mirror_fen_regression():
@@ -130,6 +130,54 @@ def test_black_mirror_fen_regression():
     assert uci_to_cn('b7e7', standard) == '炮2平5'
     mirrored, _ = fen_to_board(mirrored_fen)
     assert uci_to_cn('b0a2', mirrored) == '马2退1'
+
+
+def test_midgame_orientation_regression():
+    """回归：中盘方向误判导致整盘 180° 镜像（用户实测局面）。
+
+    现象：引擎给出 i4i0，记谱误显示为"车一退四"（正确应为"车九进四"）；
+          对方 f0f1 误显示为"将6退1"（正确应为"将4进1"）。
+    根因：detect_orientation()（红像素比例）在中盘把玩家执红判成执黑，
+          而 infer_orientation() 旧版只认开局满子行、中盘返回 None，
+          无法纠正 → 整盘 180° 翻转（列号与进退方向全部镜像）。
+    修复：infer_orientation() 用将/帅九宫位置（帅恒在 y=7..9、将恒在 y=0..2）
+          兜底，中盘亦可稳定判向并纠正。
+    """
+    from fen_utils import infer_orientation, board_to_fen as to_fen, to_engine_board
+    from move_notation import uci_to_cn
+
+    # CNN 输出的"屏幕棋盘"（已被 180° 镜像，红在屏幕上方 = 玩家执黑视角）
+    screen_fen = '3AK1B2/4A4/4B4/P3P1r2/9/8R/p8/7c1/4a4/2Ra1k3'
+    # 还原后的标准方向局面（红在下方）
+    real_fen = '3k1aR2/4a4/1c7/8p/R8/9/2r1P3P/4B4/4A4/2B1KA3'
+
+    screen, _ = fen_to_board(screen_fen)
+    # 1) 中盘亦能判向：屏幕棋盘红帅在上方(y=0)、黑将在下方(y=9) → 玩家执黑(False)
+    assert infer_orientation(screen) is False
+
+    # 2) 模拟 capture_board 修正：detect_orientation 误判 True → 纠正为 False 后，
+    #    屏幕棋盘经 to_engine_board(screen, False) 还原为标准方向 FEN
+    playing_red = True
+    inferred = infer_orientation(screen)
+    if inferred is not None and inferred != playing_red:
+        playing_red = inferred
+    assert playing_red is False
+    assert to_fen(to_engine_board(screen, False)).split(' ')[0] == real_fen
+
+    # 3) 标准方向棋盘 → 玩家执红(True)；与镜像棋盘判向相反（互为 180° 旋转）
+    standard, _ = fen_to_board(real_fen)
+    assert infer_orientation(standard) is True
+    assert to_fen(to_engine_board(standard, True)).split(' ')[0] == real_fen
+    assert to_fen(to_engine_board(screen, False)).split(' ')[0] == \
+        to_fen(to_engine_board(standard, True)).split(' ')[0]
+
+    # 4) 记谱校验：镜像棋盘上引擎着法 → 误记谱；标准方向 → 正确记谱
+    #    引擎最佳 i4i0（红车 9 路 → 底线）等价于标准方向 a5a9
+    assert uci_to_cn('i4i0', screen) == '车一退四'      # 镜像 → 误（列号+方向均错）
+    assert uci_to_cn('a5a9', standard) == '车九进四'    # 正确
+    #    对方应着 f0f1（黑将）等价于标准方向 d9d8
+    assert uci_to_cn('f0f1', screen) == '将6退1'        # 镜像 → 误
+    assert uci_to_cn('d9d8', standard) == '将4进1'      # 正确（与用户手算一致）
 
 
 if __name__ == '__main__':
