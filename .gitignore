@@ -45,3 +45,7 @@ ai_settings.json
 *.tmp
 *.temp
 Thumbs.db
+
+# ----- 本机调试 / 坐标配置（不上传）-----
+coin_click.json
+对手应着

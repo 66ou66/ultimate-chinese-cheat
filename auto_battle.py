@@ -38,6 +38,12 @@ v4 修复（"等待对方卡死，一直在找窗口/60 秒无进展"）：
   出现、快速凑够 confirm_times 票；随机噪声每帧不同、凑不够票数。
 - 落子回读确认成功后，基准改用"干净预期局面"（before+uci），不再
   把带噪声的回读帧写进 last_board，从源头减少后续差分的假阳性。
+
+v6 改动（落子确认改为"180 秒超时才暂停"）：
+- play_my_move 不再按 max_retries 固定次数重试，改为持续「点击 → 回读」，
+  直到超过 CONFIRM_TIMEOUT（默认 180 秒）仍无法确认才打印诊断并暂停。
+- 偶发的"点击被吞 / 动画未稳 / 识别抖动"可在窗口内自动重试熬过去，
+  不再几次失败就中断全自动对战。
 """
 
 import os
@@ -57,6 +63,8 @@ from board_diff import (diff_boards, contains_move, moves_in_diff)  # noqa: E402
 CLICK_INTERVAL = 0.6
 # 全自动轮询间隔（秒）
 POLL_INTERVAL = 0.8
+# 落子回读确认总超时（秒）：持续「点击→回读」直到超时仍无法确认才暂停
+CONFIRM_TIMEOUT = 180.0
 
 # Pikafish 象棋变体的"无合法着法"标记（将死/困毙），统一视为无着法
 _NO_MOVE_TOKENS = ('', '(none)', '0000', '(pass)', 'nomove', 'none', '0')
@@ -202,13 +210,20 @@ class AutoBattle:
 
     # --- 开局 ---
 
-    def start(self):
+    def start(self, random_opening=False):
         """开局：识别我方执哪方，初始化差分状态机。
 
         执红(playing_red=True) → 我方先行；执黑 → 若红方已经先走一步
         （棋盘已偏离开局局面）则直接轮到我方，否则等待对方先走。
         方向判定：CNN 红色比例 + 棋盘内容双重确认，
         校验不一致时以棋盘内容为准（开局看顶/底行整列满子，中盘看将/帅九宫位置）。
+
+        Args:
+            random_opening: 铜钱场等「随机中局」开局（非标准开局）时为 True。
+                此时不能用 _red_already_moved()（它拿标准开局 INITIAL_FEN 做
+                差分，随机中局下结果无意义），改按象棋恒定规则处理：红方恒先手
+                —— 我方执红则先走，执黑直接等待红方先走一步。随机中局将/帅
+                仍在九宫内，方向推断依旧可靠（见 infer_orientation）。
 
         Returns:
             (board, playing_red)
@@ -232,7 +247,11 @@ class AutoBattle:
             self.my_turn = True
             start_turn = 'w'
         else:
-            self.my_turn = _red_already_moved(board, playing_red)
+            if random_opening:
+                # 随机中局（铜钱场）：红方恒先手，黑方直接等待，无需对比标准开局
+                self.my_turn = False
+            else:
+                self.my_turn = _red_already_moved(board, playing_red)
             start_turn = 'b' if self.my_turn else 'w'
         # v5: 开局 FEN + 着法历史（标准方向 UCI），喂给引擎激活长将/
         # 重复将军判负等循环规则。中途启动（红方已走若干步）时历史从空
@@ -355,7 +374,7 @@ class AutoBattle:
 
     # --- 我方回合：分析 + 落子 + 回读确认 ---
 
-    def play_my_move(self, max_retries=3, max_reads=8,
+    def play_my_move(self, confirm_timeout=CONFIRM_TIMEOUT, max_reads=8,
                      wait_anim=0.6, wait_read=0.4):
         """轮到我方：引擎分析 → 自动点击落子 → 回读确认落子生效。
 
@@ -367,20 +386,22 @@ class AutoBattle:
         对比基准优先用已确认局面 self.last_board（回读与预期共用同一基准），
         避免"确认帧 → 落子前帧"时间差把对方下一步混进 diff。
 
-        重试策略（v2）：只在回读发现"棋盘无变化（点击未生效）"时才重试点击；
-        若棋盘有变化但一直对不上预期，最后兜底再重读 2 帧确认一次，
-        仍失败才返回 confirm_failed 交人工，避免把局面点乱。
+        超时策略（v6）：不再按固定次数重试，而是持续「点击 → 回读」，直到
+        超过 confirm_timeout 秒仍无法确认落子生效，才打印诊断并返回
+        confirm_failed 交人工；期间任意一帧确认成功即立即返回 'ok'。
+        这样偶发的"点击被吞 / 动画未稳 / 识别抖动"都能自动熬过去，
+        不会像旧版那样重试几次就暂停全自动对战。
 
         Args（主要供测试缩短等待）:
-            max_retries: 点击未生效（无变化）时的重试次数
-            max_reads:   回读时最多尝试读取次数（防动画中间态）
+            confirm_timeout: 落子确认总超时（秒），超时仍无法确认才暂停
+            max_reads:   单次点击后回读时最多尝试读取次数（防动画中间态）
             wait_anim:   落子后等待动画稳定的秒数
             wait_read:   回读间隔秒数
 
         Returns:
             'no_move': 引擎无合法着法（对局结束）
             'ok': 落子成功并回读确认
-            'confirm_failed': 回读确认失败（需人工介入）
+            'confirm_failed': 超过 confirm_timeout 仍无法确认（需人工介入）
             'board_gone': 识别质量崩溃（棋盘疑似已切换为结算界面：对手投降/超时），
                           按对局结束处理，不应再落子
         """
@@ -411,19 +432,45 @@ class AutoBattle:
         from auto_player import AutoPlayer
         player = AutoPlayer(self.advisor.bot, click_interval=self.click_interval)
 
-        for _ in range(max_retries):
+        # v6: 持续「点击→回读」直到确认成功或超过 confirm_timeout 秒。
+        # 旧版按 max_retries 固定次数重试，偶发的"点击被吞 / 动画未稳"
+        # 会几次内误判失败并暂停全自动对战；现改为按时间兜底，给足窗口。
+        start_time = time.time()
+        last_actual = None
+        while True:
+            if time.time() - start_time >= confirm_timeout:
+                # 超过总超时仍无法确认落子生效 → 打印诊断后交人工
+                print(f"    [回读诊断] 超过 {confirm_timeout:g} 秒仍无法确认"
+                      f"落子生效，暂停。")
+                print(f"    [回读诊断] 引擎着法 uci={uci}"
+                      f"（{'执红' if data['playing_red'] else '执黑'}）")
+                print("    [回读诊断] 预期变化格: " + _fmt_cells(d_expected.changed))
+                if last_actual is not None:
+                    print("    [回读诊断] 实际变化格: "
+                          + _fmt_cells(last_actual.changed))
+                    cands = moves_in_diff(last_actual)
+                    if cands:
+                        shown = cands[:6]
+                        extra = ('' if len(cands) <= 6
+                                 else f" …（共 {len(cands)} 个）")
+                        print("    [回读诊断] 实际可识别着法: "
+                              + _fmt_moves(shown) + extra)
+                    else:
+                        print("    [回读诊断] 实际变化不构成任何同色 from→to 着法"
+                              "（多为识别噪声 / 棋子颜色被认错）")
+                else:
+                    print("    [回读诊断] 读取不到稳定局面（连续识别失败）")
+                break
+
             player.play_uci(uci, data['playing_red'])
             time.sleep(wait_anim)
-            no_change = False
-            last_actual = None
             for _ in range(max_reads):
                 try:
                     board2, _ = self.advisor.capture_board()
                 except Exception:
-                    print(f"    [回读] 截屏/识别异常（按\"点击未生效\"处理）:\n"
+                    print(f"    [回读] 截屏/识别异常（继续重试）:\n"
                           f"{traceback.format_exc()}")
-                    no_change = True
-                    break
+                    break  # 识别异常 → 重试点击
                 d_actual = diff_boards(before, board2)
                 if contains_move(d_actual, d_expected):
                     # 基准 = 干净预期局面（before+uci），而不是带噪声的回读帧：
@@ -436,48 +483,10 @@ class AutoBattle:
                     return 'ok'
                 last_actual = d_actual
                 if not d_actual.changed:
-                    no_change = True
-                    break  # 点击未生效 → 重试点击
+                    break  # 点击未生效 → 尽快重试点击
                 time.sleep(wait_read)  # 动画/识别不稳，继续读
-            if no_change:
-                continue  # 点击未生效 → 重试点击
-            # 棋盘有变化但对不上预期：兜底再连读 2 帧做最后一次确认
-            # （回读窗口内每帧都混噪声/对方抢步时，稳定后帧内已含预期 from/to）
-            confirmed = False
-            for _ in range(2):
-                try:
-                    board2, _ = self.advisor.capture_board()
-                except Exception:
-                    break
-                if contains_move(diff_boards(before, board2), d_expected):
-                    self.last_board = [row[:] for row in expected]
-                    self.my_turn = False
-                    self.move_count += 1
-                    if self.start_fen is not None:
-                        self.move_history.append(uci)
-                    confirmed = True
-                    break
-                time.sleep(0.3)
-            if confirmed:
-                return 'ok'
-            # 确实对不上预期 → 不盲目重复点击，打印诊断后交人工
-            print(f"    [回读诊断] 引擎着法 uci={uci}"
-                  f"（{'执红' if data['playing_red'] else '执黑'}）")
-            print("    [回读诊断] 预期变化格: " + _fmt_cells(d_expected.changed))
-            if last_actual is not None:
-                print("    [回读诊断] 实际变化格: " + _fmt_cells(last_actual.changed))
-                cands = moves_in_diff(last_actual)
-                if cands:
-                    shown = cands[:6]
-                    extra = '' if len(cands) <= 6 else f" …（共 {len(cands)} 个）"
-                    print("    [回读诊断] 实际可识别着法: "
-                          + _fmt_moves(shown) + extra)
-                else:
-                    print("    [回读诊断] 实际变化不构成任何同色 from→to 着法"
-                          "（多为识别噪声 / 棋子颜色被认错）")
-            else:
-                print("    [回读诊断] 读取不到稳定局面（连续识别失败）")
-            break
+            # 未确认成功 → 循环继续（重新点击），直到超过 confirm_timeout
+
         # 兜底：确认失败先排除"棋盘已消失"（对手投降/超时跳结算界面），
         # 此时不是落子失败而是对局结束，交上层按 finished 处理。
         if getattr(self.advisor, 'recognition_collapsed', lambda: False)():

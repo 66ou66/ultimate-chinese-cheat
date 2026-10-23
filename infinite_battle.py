@@ -41,6 +41,8 @@ from hotkey import poll_stop  # noqa: E402
 DEFAULT_INTERVAL = 1.0    # 坐标序列相邻两次点击间隔（秒）
 DEFAULT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             'auto_click.json')
+COIN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         'coin_click.json')   # 铜钱场专用坐标序列（与 6 键分开）
 POLL_INTERVAL = 0.8       # 对弈轮询间隔（秒，沿用 auto_battle）
 WAIT_TIMEOUT = 180.0       # 单局无进展超时（秒）
 MAX_MOVES = 200           # 单局最大走子数（保护上限）
@@ -331,6 +333,74 @@ def wait_for_opening(advisor, restart_wait=RESTART_WAIT, retries=3):
     return 'timeout'
 
 
+def is_fresh_position(board, prev_board=None):
+    """判断 board 是否为「新的合法随机对局局面」（铜钱场续局用）。
+
+    与 is_opening_board 的区别：铜钱场开局是**随机中局**，无法与固定的标准
+    开局局面（INITIAL_FEN）比对，故改用「合法新局面」判据：
+      1. 双方帅/将都在棋盘上（对局未结束，is_game_over 为 False）；
+      2. 画面确已刷新 —— 与上一帧（结算/终局界面）不同。
+    这样既能放过「新的随机中局」（将帅齐全且与旧帧不同），又能挡住「仍停留
+    在结算/终局界面」（通常缺帅/将）与「画面还没刷新」（与旧帧逐格一致）。
+
+    纯函数，不依赖窗口/鼠标/引擎，可独立单测。
+
+    Args:
+        board: 当前识别的 10x9 棋盘（屏幕方向）。
+        prev_board: 上一帧棋盘（通常是对局结束时的画面）；None 时只做合法性判断。
+
+    Returns:
+        True = 已是新的合法对局局面；False = 尚未就绪。
+    """
+    from fen_utils import is_game_over, board_placement   # noqa: E402
+
+    if is_game_over(board):
+        return False
+    if prev_board is not None \
+            and board_placement(board) == board_placement(prev_board):
+        return False
+    return True
+
+
+def wait_for_fresh_position(advisor, prev_board=None, restart_wait=RESTART_WAIT,
+                            retries=3):
+    """铜钱场续局：点击坐标后轮询识别，直到画面确认已变为新的随机对局局面。
+
+    随机中局开局无法与标准开局比对（见 is_fresh_position），故不能复用
+    wait_for_opening。轮询节奏与 ` 取消语义与 wait_for_opening 完全一致：
+    每轮最多 restart_wait 秒、最多 retries 轮，期间持续响应 `` ` `` 紧急退出键；
+    截屏/识别异常视为「新局还没就绪」继续等待。
+
+    Args:
+        advisor: Advisor 实例（提供 capture_board()）
+        prev_board: 对局结束时的棋盘（区分「新局」与「仍停在旧画面」）
+        restart_wait: 每轮轮询等待新局加载的秒数上限
+        retries: 最大轮数
+
+    Returns:
+        'ok': 已识别到新的合法对局局面（新局就绪）
+        'stopped': 用户按 `` ` `` 键取消
+        'timeout': 超过 retries × restart_wait 仍未见新局面
+    """
+    for attempt in range(1, retries + 1):
+        deadline = time.time() + restart_wait
+        while True:
+            if poll_stop():
+                return 'stopped'
+            try:
+                board, _ = advisor.capture_board()
+            except Exception:
+                board = None   # 截屏/识别异常 → 视为「新局还没就绪」，继续等
+            if board is not None and is_fresh_position(board, prev_board):
+                return 'ok'
+            if time.time() >= deadline:
+                break
+            time.sleep(0.3)
+        print(f"  ⏳ 尚未识别到新的对局局面，第 {attempt}/{retries} 轮等待..."
+              f"（每轮最多 {restart_wait:g} 秒；按 ` 取消）")
+    return 'timeout'
+
+
 def play_one_game(advisor, battle, poll_key=None):
     """单局对弈主循环（差分等待对方 + 引擎落子 + 回读确认）。
 
@@ -554,4 +624,128 @@ def run_infinite_battle(advisor, store, poll_interval=POLL_INTERVAL,
                 print("   ⚠ 未识别到开局棋盘，重新点击坐标序列续局（按 ` 取消）...")
                 continue
             break  # state == 'ok'：画面已是开局棋盘，回到循环顶部由 battle.start() 正式开始
+
+
+def run_coin_battle(advisor, store, poll_interval=POLL_INTERVAL,
+                    restart_wait=RESTART_WAIT, restart_retries=3,
+                    clicker=None):
+    """铜钱场自动对战：随机中局开局，单局结束后自动点坐标续局，循环直到停止。
+
+    与 run_infinite_battle（标准开局）的唯一区别在于「开局判定」：
+      1. 开局是**随机中局**，用 AutoBattle.start(random_opening=True) —— 红方恒
+         先手，我方执红立即走、执黑等红方先走一步，不再与标准开局 INITIAL_FEN
+         做差分（随机局面下该差分无意义）；我方执红/执黑每局可能互换，方向由
+         将/帅九宫位置逐帧自动纠正；
+      2. 续局时用 wait_for_fresh_position（「帅将齐全 + 画面已刷新」判据）替代
+         wait_for_opening（「与标准开局差异 ≤ 容忍格数」判据）——随机开局无法与
+         固定局面比对。
+    其余（单局主循环 play_one_game、坐标点击、`` ` `` 取消、异常处理）与无限
+    对战完全一致。
+
+    Args:
+        advisor: Advisor 实例
+        store: ClickPointStore（铜钱场专用坐标序列 + 相邻点击间隔）
+        poll_interval: 对弈轮询间隔（秒）
+        restart_wait: 续局时每轮轮询等待新局加载的秒数上限（等待期间持续识别棋盘）
+        restart_retries: 每次点击坐标后 wait_for_fresh_position 的识别轮数上限
+        clicker: 点击函数 clicker(x, y)（测试可注入），默认 click_at
+
+    Returns:
+        'stopped': 用户手动停止
+        'abort': 异常停止（确认失败/超时/步数上限）
+        'no_points': 对局结束但未配置坐标，无法续局
+        'restart_failed': 新局 battle.start() 开局识别失败（含重试后仍失败）
+    """
+    from auto_battle import AutoBattle
+
+    do_click = clicker or click_at
+    round_no = 0
+
+    while True:
+        battle = AutoBattle(advisor, poll_interval=poll_interval)
+        try:
+            board, playing_red = battle.start(random_opening=True)
+        except Exception as exc:
+            if round_no == 0:
+                print(f"\n❌ 第 1 局开局识别失败: {exc}")
+                print("   请确认：天天象棋已打开且进入铜钱场棋盘界面；校准数据有效。")
+                return 'restart_failed'
+            # 续局失败：可能是新局还没加载好，等待后重试
+            for attempt in range(1, restart_retries + 1):
+                print(f"  ⏳ 新局未就绪，{restart_wait:g} 秒后第"
+                      f"{attempt}/{restart_retries} 次重试...")
+                deadline = time.time() + restart_wait
+                while time.time() < deadline:
+                    if poll_stop():
+                        print("\n⏹ 已按 ` 键，退出铜钱场自动对战。")
+                        return 'stopped'
+                    time.sleep(0.05)
+                battle = AutoBattle(advisor, poll_interval=poll_interval)
+                try:
+                    board, playing_red = battle.start(random_opening=True)
+                    break
+                except Exception as exc2:
+                    exc = exc2
+            else:
+                print(f"\n❌ 续局开局识别失败（已重试 {restart_retries} 次）: {exc}")
+                print("   请确认：天天象棋已打开且进入铜钱场棋盘界面；校准数据有效。")
+                return 'restart_failed'
+
+        round_no += 1
+        side = '执红（先手）' if playing_red else '执黑（后手，等红方先走）'
+        print(f"\n⚔ 铜钱场第 {round_no} 局开始：我方{side}。")
+        print("   按 [Q]/[Esc] 或 [`] 键随时停止（` 为全局热键，无需点回本窗口）；")
+        print("   鼠标甩到屏幕左上角紧急中止。")
+        print_board_cn(board, "开局识别（随机中局）")
+
+        status = play_one_game(advisor, battle)
+        if status != 'finished':
+            if status == 'stopped':
+                print("\n⏹ 已停止铜钱场自动对战。")
+            else:
+                print("\n🛑 异常停止（落子确认失败 / 超时 / 步数上限），请人工介入。")
+            return status
+
+        # 记录本局结束时的画面，供续局「新局面」判据区分旧帧（结算/终局界面）
+        try:
+            prev_board, _ = advisor.capture_board()
+        except Exception:
+            prev_board = None
+
+        # 对局正常结束 → 点击坐标续局
+        points = [(x, y) for _, x, y in store.list_points()]
+        if not points:
+            print("\n⚠ 本局已结束，但未配置任何坐标，无法自动开始下一局。")
+            print("   请返回菜单按 [3] 添加坐标（如铜钱场「再来一局」按钮位置）。")
+            return 'no_points'
+
+        print(f"\n⏳ 本局已结束。{restart_wait:g} 秒后自动点击坐标开始下一局"
+              f"（{len(points)} 个，间隔 {store.interval():g} 秒；按 ` 取消）...")
+        deadline = time.time() + restart_wait
+        while time.time() < deadline:
+            if poll_stop():
+                print("\n⏹ 已按 ` 键，取消自动续局，退出铜钱场对战。")
+                return 'stopped'
+            time.sleep(0.05)
+
+        # 点击坐标 → 等待新随机局面就绪。若 wait_for_fresh_position 超时（未识别到
+        # 新局面），自动重新点击坐标序列再等（应对「再来一局」未生效 / 界面卡在
+        # 结算页 / 新局加载慢），直到识别成功或按 ` 取消。
+        while True:
+            print("   🖱 自动点击坐标序列...")
+            click_sequence(points, store.interval(), do_click)
+            # 关键：点击「再来一局」后不能盲等固定时长——若识别太早，capture_board()
+            # 会把仍在屏幕上的「结算/终局界面」当成新局棋盘并静默返回（不抛异常）。
+            # 这里轮询识别，直到画面确认已变为「帅将齐全且与上一帧不同」的新局面。
+            print("   ✅ 已点击坐标，等待新对局就绪（确认画面已变为新的对局局面）...")
+            state = wait_for_fresh_position(advisor, prev_board=prev_board,
+                                           restart_wait=restart_wait,
+                                           retries=restart_retries)
+            if state == 'stopped':
+                print("\n⏹ 已按 ` 键，取消自动续局，退出铜钱场对战。")
+                return 'stopped'
+            if state == 'timeout':
+                print("   ⚠ 未识别到新的对局局面，重新点击坐标序列续局（按 ` 取消）...")
+                continue
+            break  # state == 'ok'：画面已是新的对局局面，回到顶部由 battle.start() 正式开始
 

@@ -337,6 +337,30 @@ class _FakeAdvisor:
         return self.collapsed
 
 
+class _FlakyAdvisor(_FakeAdvisor):
+    """按 capture_board 调用次数切换返回局面（模拟"点击被吞/对不上"后自愈）。
+
+    前 `fail_reads` 次 capture_board 返回 `fail_board`（默认 = 起始局面，
+    即"点击未生效/棋盘无变化"；也可传"有变化但对不上预期"的局面），
+    此后返回 `ok_board`（表示落子已生效）。用于验证 v6「在超时窗口内
+    持续重试直到确认成功」的行为。
+    """
+
+    def __init__(self, board, playing_red, bestmove, ok_board, fail_reads,
+                 fail_board=None):
+        super().__init__(board, playing_red, bestmove=bestmove)
+        self.ok_board = ok_board
+        self.fail_reads = fail_reads
+        self.fail_board = fail_board if fail_board is not None else board
+        self.reads = 0
+
+    def capture_board(self):
+        self.reads += 1
+        if self.reads > self.fail_reads:
+            return self.ok_board, self.playing_red
+        return self.fail_board, self.playing_red
+
+
 class _FakeBot:
     """假的 Bot：提供格子逻辑坐标与窗口信息（v3 坐标层需要 win_x/win_y/dpi_scale）。"""
 
@@ -372,7 +396,7 @@ def test_play_my_move_ok():
     battle = AutoBattle(fake, click_interval=0.01)
     patcher = _patch_pyautogui()
     try:
-        assert battle.play_my_move(max_retries=1, max_reads=3,
+        assert battle.play_my_move(confirm_timeout=1.0, max_reads=3,
                                    wait_anim=0.01, wait_read=0.01) == 'ok'
     finally:
         patcher.stop()
@@ -384,7 +408,7 @@ def test_play_my_move_no_move():
     b1, _, _ = _boards()
     fake = _FakeAdvisor(b1, playing_red=True, bestmove='')
     battle = AutoBattle(fake)
-    assert battle.play_my_move(max_retries=1, max_reads=1,
+    assert battle.play_my_move(confirm_timeout=1.0, max_reads=1,
                                wait_anim=0, wait_read=0) == 'no_move'
 
 
@@ -397,7 +421,7 @@ def test_play_my_move_ok_black():
     battle = AutoBattle(fake, click_interval=0.01)
     patcher = _patch_pyautogui()
     try:
-        assert battle.play_my_move(max_retries=1, max_reads=3,
+        assert battle.play_my_move(confirm_timeout=1.0, max_reads=3,
                                    wait_anim=0.01, wait_read=0.01) == 'ok'
     finally:
         patcher.stop()
@@ -413,7 +437,7 @@ def test_play_my_move_confirm_failed():
     battle = AutoBattle(fake, click_interval=0.01)
     patcher = _patch_pyautogui()
     try:
-        assert battle.play_my_move(max_retries=1, max_reads=2,
+        assert battle.play_my_move(confirm_timeout=0.01, max_reads=2,
                                    wait_anim=0.01, wait_read=0.01) == 'confirm_failed'
     finally:
         patcher.stop()
@@ -426,7 +450,7 @@ def test_play_my_move_board_gone_on_collapse():
     battle = AutoBattle(fake, click_interval=0.01)
     patcher = _patch_pyautogui()
     try:
-        assert battle.play_my_move(max_retries=1, max_reads=2,
+        assert battle.play_my_move(confirm_timeout=0.01, max_reads=2,
                                    wait_anim=0.01, wait_read=0.01) == 'board_gone'
     finally:
         patcher.stop()
@@ -444,7 +468,7 @@ def test_play_my_move_ok_with_extra_change():
     battle = AutoBattle(fake, click_interval=0.01)
     patcher = _patch_pyautogui()
     try:
-        assert battle.play_my_move(max_retries=1, max_reads=3,
+        assert battle.play_my_move(confirm_timeout=1.0, max_reads=3,
                                    wait_anim=0.01, wait_read=0.01) == 'ok'
     finally:
         patcher.stop()
@@ -464,7 +488,7 @@ def test_play_my_move_ok_with_noise():
     battle = AutoBattle(fake, click_interval=0.01)
     patcher = _patch_pyautogui()
     try:
-        assert battle.play_my_move(max_retries=1, max_reads=3,
+        assert battle.play_my_move(confirm_timeout=1.0, max_reads=3,
                                    wait_anim=0.01, wait_read=0.01) == 'ok'
     finally:
         patcher.stop()
@@ -480,11 +504,64 @@ def test_play_my_move_uses_last_board_as_baseline():
     battle.my_turn = True
     patcher = _patch_pyautogui()
     try:
-        assert battle.play_my_move(max_retries=1, max_reads=2,
+        assert battle.play_my_move(confirm_timeout=1.0, max_reads=2,
                                    wait_anim=0.01, wait_read=0.01) == 'ok'
     finally:
         patcher.stop()
     assert battle.last_board == b2
+
+
+# --- v6: 落子确认改为「超时兜底」后持续重试的行为 ---
+
+def test_play_my_move_retries_until_success():
+    """点击多次"没反应"（超过旧版 max_retries=3）仍持续重试，直到确认成功。
+
+    v6：改为超时兜底后，前 4 次点击无效、第 5 次才生效也应返回 'ok'，
+    不再像旧版那样几次失败就误报 confirm_failed 暂停全自动对战。
+    """
+    b1, b2, _ = _boards()
+    fake = _FlakyAdvisor(b1, True, 'b2e2', ok_board=b2, fail_reads=4)
+    battle = AutoBattle(fake, click_interval=0.01)
+    patcher = _patch_pyautogui()
+    try:
+        assert battle.play_my_move(confirm_timeout=5.0, max_reads=1,
+                                   wait_anim=0.0, wait_read=0.0) == 'ok'
+    finally:
+        patcher.stop()
+    assert fake.reads >= 5          # 确实重试了 5 次才成功（旧版只允许 3 次）
+    assert battle.my_turn is False
+    assert battle.last_board == b2
+
+
+def test_play_my_move_retries_when_board_mismatched():
+    """回读帧"有变化但对不上预期"时也持续重试，直到某帧确认成功。"""
+    b1, b2, _ = _boards()
+    b_wrong = apply_move(b1, 'b7e7')   # 黑炮平中：有变化但不是我方 b2e2
+    fake = _FlakyAdvisor(b1, True, 'b2e2', ok_board=b2, fail_reads=2,
+                         fail_board=b_wrong)
+    battle = AutoBattle(fake, click_interval=0.01)
+    patcher = _patch_pyautogui()
+    try:
+        assert battle.play_my_move(confirm_timeout=5.0, max_reads=1,
+                                   wait_anim=0.0, wait_read=0.0) == 'ok'
+    finally:
+        patcher.stop()
+    assert battle.my_turn is False
+    assert battle.last_board == b2
+
+
+def test_play_my_move_pauses_after_timeout_with_retries():
+    """点击始终无反应 → 超时窗口内持续重试多次，超过 confirm_timeout 才失败。"""
+    b1, _, _ = _boards()
+    fake = _FlakyAdvisor(b1, True, 'b2e2', ok_board=b1, fail_reads=10 ** 9)
+    battle = AutoBattle(fake, click_interval=0.01)
+    patcher = _patch_pyautogui()
+    try:
+        assert battle.play_my_move(confirm_timeout=1.5, max_reads=1,
+                                   wait_anim=0.01, wait_read=0.0) == 'confirm_failed'
+    finally:
+        patcher.stop()
+    assert fake.reads > 1           # 不是点一次就放弃，而是重试到超时
 
 
 # --- 引擎着法空判 / 方向推断 ---
@@ -548,7 +625,7 @@ def test_move_history_tracks_opponent_and_self():
     battle.my_turn = True
     patcher = _patch_pyautogui()
     try:
-        assert battle.play_my_move(max_retries=1, max_reads=3,
+        assert battle.play_my_move(confirm_timeout=1.0, max_reads=3,
                                    wait_anim=0.01, wait_read=0.01) == 'ok'
     finally:
         patcher.stop()
@@ -585,6 +662,70 @@ def test_reconcile_history_resets_on_mismatch():
     assert battle._reconcile_history(b2, True) is False
     assert battle.move_history == []
     assert battle.start_fen.startswith('rnbakabnr')   # 已重置为当前局面
+
+
+# --- 铜钱场：随机中局开局（random_opening=True）---
+
+def _random_midgame():
+    """随机中局局面：双方各走若干步、双方底线均已被破坏（贴近铜钱场随机开局）。
+
+    底线被破坏后 infer_orientation 无法用「顶/底行整列满子」判色，
+    只能走将/帅九宫兜底分支 —— 正是铜钱场真实场景。
+    """
+    b, _ = fen_to_board(FEN1)
+    for uci in ('b2e2', 'b7e7', 'a0a1', 'a9a8', 'c3c4'):
+        b = apply_move(b, uci)
+    return b
+
+
+def test_start_random_opening_red_moves_first():
+    """铜钱场：我方执红 → 立即先手（红方恒先手，随机中局同样成立）。"""
+    mid = _random_midgame()
+    battle = AutoBattle(_FakeAdvisorStart(mid, True))
+    board, pr = battle.start(random_opening=True)
+    assert pr is True
+    assert battle.my_turn is True
+    assert battle.last_board == mid
+    assert battle.start_fen.endswith(' w - - 0 1')   # 随机中局 FEN + 轮到红方
+    assert battle.move_history == []
+
+
+def test_start_random_opening_black_waits():
+    """铜钱场：我方执黑 → 直接等红方先走（不做标准开局差分）。"""
+    mid = _random_midgame()
+    screen = [row[::-1] for row in reversed(mid)]      # 红在上 = 我方执黑
+    battle = AutoBattle(_FakeAdvisorStart(screen, False))
+    board, pr = battle.start(random_opening=True)
+    assert pr is False
+    assert battle.my_turn is False       # 关键：不能误判成"红方已走"
+    assert battle.last_board == screen   # 基准仍用当前确认局面
+    assert battle.start_fen.endswith(' w - - 0 1')     # 红尚未走 → 轮红
+    assert battle.move_history == []
+
+
+def test_random_opening_vs_standard_opening_black():
+    """对照：同一随机中局，标准开局逻辑判"红方已走"，随机开局逻辑则等待红方。"""
+    mid = _random_midgame()
+    screen = [row[::-1] for row in reversed(mid)]
+    std = AutoBattle(_FakeAdvisorStart(screen, False))
+    std.start()                             # 标准开局：与 INITIAL_FEN 差分 → 红方已走
+    assert std.my_turn is True
+    assert std.start_fen.endswith(' b - - 0 1')
+    rand = AutoBattle(_FakeAdvisorStart(screen, False))
+    rand.start(random_opening=True)         # 随机开局：红恒先手 → 等待红方
+    assert rand.my_turn is False
+    assert rand.start_fen.endswith(' w - - 0 1')
+
+
+def test_start_random_opening_corrects_orientation():
+    """铜钱场每局可能互换先后手：方向推断仍以将/帅九宫为准自动纠正。"""
+    mid = _random_midgame()
+    fake = _FakeAdvisorStart(mid, False)    # 底行已破 → 走将/帅九宫兜底 → 判为执红
+    battle = AutoBattle(fake)
+    board, pr = battle.start(random_opening=True)
+    assert pr is True
+    assert fake.bot.playing_red is True     # 已同步修正到底层 Bot
+    assert battle.my_turn is True
 
 
 if __name__ == '__main__':

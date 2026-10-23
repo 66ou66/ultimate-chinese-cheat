@@ -25,7 +25,7 @@ from fen_utils import to_engine_board  # noqa: E402
 from calib_manager import CalibStore, run_calibration, sanitize_name  # noqa: E402
 from hotkey import poll_stop                                   # noqa: E402
 from infinite_battle import (ClickPointStore, get_cursor_pos,  # noqa: E402
-                             move_mouse, run_infinite_battle)
+                             move_mouse, run_coin_battle, run_infinite_battle)
 from ai_settings import FIELDS, get_settings, reset_settings, save_settings  # noqa: E402
 from auto_mode_settings import get_interval, save_interval            # noqa: E402
 
@@ -288,6 +288,64 @@ def infinite_battle_menu(advisor):
         elif key in ('0', '6'):
             print("6 - 开始无限全自动对战...")
             run_infinite_battle(advisor, store)
+        elif key == '1':
+            print("1 - 移动坐标（方向键微调真实鼠标指针）...")
+            if _point_move(store):
+                return
+        elif key == '2':
+            print("2 - 删除坐标...")
+            if _point_delete(store):
+                return
+        elif key == '3':
+            print("3 - 添加坐标（鼠标移到目标位置后按回车记录）...")
+            if _point_add(store):
+                return
+        elif key == '4':
+            print("4 - 设置点击间隔...")
+            _point_set_interval(store)
+        elif key is not None:
+            print(f"  '{key}' 无效，请按 1/2/3/4/6/5")
+
+
+def coin_battle_menu(advisor):
+    """铜钱场自动对战菜单：随机中局开局，对局结束后自动点击坐标序列开下一局。
+
+    与 [6] 无限全自动对战的区别：
+      1. 开局是**随机中局**（红方恒先手，我方可能执红或执黑，且每局可能互换），
+         交由 AutoBattle.start(random_opening=True) 处理；
+      2. 坐标存到独立文件 coin_click.json（铜钱场的「再来一局」等按钮位置
+         通常与标准对战不同，两套坐标互不干扰）。
+
+    菜单项：[1]移动坐标 [2]删除坐标 [3]添加坐标 [4]设置点击间隔
+           [6]/[0]开始铜钱场对战 [5]/[Q]/[`] 返回主菜单
+    """
+    from infinite_battle import ClickPointStore, COIN_PATH, run_coin_battle
+
+    store = ClickPointStore(COIN_PATH)
+    while True:
+        points = store.list_points()
+        print("\n" + "=" * 52)
+        print("  铜钱场自动对战（随机中局开局；结束后自动点击坐标开下一局）")
+        print("=" * 52)
+        if points:
+            print("  点击坐标序列（按编号顺序点击）：")
+            for idx, x, y in points:
+                print(f"    {idx}. ({x}, {y})")
+        else:
+            print("  暂无坐标（请先按 [3] 添加，如铜钱场「再来一局」按钮位置）。")
+        print(f"  点击间隔：{store.interval():g} 秒")
+        print("=" * 52)
+        print("  [1] 移动坐标  [2] 删除坐标  [3] 添加坐标")
+        print("  [4] 设置点击间隔  [6]/[0] 开始铜钱场对战")
+        print("  [5]/[Q]/[`] 返回主菜单")
+        print("=" * 52)
+        key = _read_key_or_hotkey()
+        if key in ('5', 'q', '\x1b', '`'):
+            print(f"  {key} - 已返回主菜单。")
+            return
+        elif key in ('0', '6'):
+            print("6 - 开始铜钱场自动对战...")
+            run_coin_battle(advisor, store)
         elif key == '1':
             print("1 - 移动坐标（方向键微调真实鼠标指针）...")
             if _point_move(store):
@@ -826,6 +884,7 @@ def main():
     print("  [5]     校验管理（多棋盘模板：添加/选择/删除/重命名/重新校验）")
     print("  [9]     AI 解说设置（API 密钥/地址/模型/超时/随机性/max_tokens）")
     print("  [6]     无限全自动对战（对局结束自动点坐标续局，[1~4] 配置坐标）")
+    print("  [7]     铜钱场自动对战（随机中局开局，红先黑后，独立坐标配置）")
     print("  [`]     全局紧急退出键：自动/识别/校验/编辑中随时按它返回主菜单")
     print("  [R]/[B] 设定当前轮到 红方/黑方 走")
     print("  [2]     用 AI 解释上一次建议")
@@ -842,6 +901,9 @@ def main():
         elif key == '6':
             print("6 - 无限全自动对战...")
             infinite_battle_menu(advisor)
+        elif key == '7':
+            print("7 - 铜钱场自动对战...")
+            coin_battle_menu(advisor)
         elif key == '1':
             print("1 - 识别并分析（多帧投票去噪）...")
             try:
@@ -888,7 +950,7 @@ def main():
             print(f"  E - 已切换为{mode}（出建议后{'自动' if state['auto_explain'] else '不自动'}调 AI 解说）")
         else:
             if key is not None:
-                print(f"'{key}' 无效，请按 9 / 6 / 1 / 3 / 4 / 5 / R / B / 2 / E / Q")
+                print(f"'{key}' 无效，请按 9 / 6 / 7 / 1 / 3 / 4 / 5 / R / B / 2 / E / Q")
 
     advisor.close()
 

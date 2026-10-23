@@ -22,8 +22,10 @@ for _stream in (sys.stdout, sys.stderr):
 from fen_utils import fen_to_board                        # noqa: E402
 from move_notation import apply_move                      # noqa: E402
 from infinite_battle import (ClickPointStore, click_sequence,  # noqa: E402
-                             is_opening_board, play_one_game,
-                             run_infinite_battle, wait_for_opening)
+                             is_fresh_position, is_opening_board,
+                             play_one_game, run_coin_battle,
+                             run_infinite_battle, wait_for_fresh_position,
+                             wait_for_opening)
 
 FEN1 = 'rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR'
 
@@ -402,6 +404,204 @@ def test_run_infinite_battle_restart_cancelled_by_backtick():
                 mock.patch('infinite_battle.wait_for_opening', return_value='stopped'):
             status = run_infinite_battle(advisor, store, restart_wait=0,
                                          clicker=lambda x, y: None)
+        assert status == 'stopped'
+    finally:
+        shutil.rmtree(tmp)
+
+
+# --- is_fresh_position（铜钱场续局：新随机局面是否就绪）---
+
+def test_is_fresh_position_accepts_legal_boards():
+    """帅将齐全的局面（标准开局 / 随机中局）→ 视为合法新局面。"""
+    assert is_fresh_position(_opening_board()) is True
+    assert is_fresh_position(_midgame_board()) is True
+
+
+def test_is_fresh_position_rejects_game_over():
+    """缺帅/将（终局或结算界面）→ 未就绪。"""
+    assert is_fresh_position(_no_red_board()) is False
+
+
+def test_is_fresh_position_rejects_unchanged_frame():
+    """与上一帧逐格一致（画面还没刷新）→ 未就绪。"""
+    b = _midgame_board()
+    assert is_fresh_position([row[:] for row in b], prev_board=b) is False
+
+
+def test_is_fresh_position_accepts_changed_frame():
+    """与上一帧不同且帅将都在 → 就绪（上一帧是终局画面同样能放过新局）。"""
+    assert is_fresh_position(_midgame_board(),
+                             prev_board=_opening_board()) is True
+    assert is_fresh_position(_opening_board(),
+                             prev_board=_no_red_board()) is True
+
+
+# --- wait_for_fresh_position（点击坐标后轮询到新随机局面）---
+
+def test_wait_for_fresh_position_ok():
+    """先识别到旧画面（终局/与上一帧相同），再识别到新合法局面 → 'ok'。"""
+    advisor = _WaitAdvisor([_no_red_board(), _no_red_board(),
+                            _midgame_board()])
+    with mock.patch('infinite_battle.poll_stop', return_value=False), \
+            mock.patch('time.sleep'):
+        state = wait_for_fresh_position(advisor, prev_board=_no_red_board(),
+                                        restart_wait=10, retries=3)
+    assert state == 'ok'
+
+
+def test_wait_for_fresh_position_timeout():
+    """画面始终停在旧局面（与 prev_board 相同）→ 超时 'timeout'。"""
+    b = _midgame_board()
+    advisor = _WaitAdvisor([b])
+    with mock.patch('infinite_battle.poll_stop', return_value=False), \
+            mock.patch('time.sleep'):
+        state = wait_for_fresh_position(advisor, prev_board=b,
+                                        restart_wait=0, retries=2)
+    assert state == 'timeout'
+
+
+def test_wait_for_fresh_position_stopped():
+    """等待期间按下 ` 键 → 立即取消 'stopped'。"""
+    advisor = _WaitAdvisor([_midgame_board()])
+    with mock.patch('infinite_battle.poll_stop', return_value=True), \
+            mock.patch('time.sleep'):
+        state = wait_for_fresh_position(advisor, restart_wait=10, retries=3)
+    assert state == 'stopped'
+
+
+def test_wait_for_fresh_position_tolerates_recognition_error():
+    """截屏/识别异常不中断等待（视为还没就绪），恢复后立即放行。"""
+    advisor = _FailThenOkAdvisor()
+    with mock.patch('infinite_battle.poll_stop', return_value=False), \
+            mock.patch('time.sleep'):
+        state = wait_for_fresh_position(advisor, restart_wait=10, retries=3)
+    assert state == 'ok'
+
+
+# --- run_coin_battle（铜钱场无限循环：随机开局 + 新局面续局）---
+
+class _FakeCoinBattleLoop:
+    """铜钱场假 battle：断言必须以 random_opening=True 启动；第 3 次抛异常。"""
+
+    starts = 0
+
+    def __init__(self, advisor, **kwargs):
+        self.poll_interval = 0.8
+        self.move_count = 0
+        self.my_turn = False
+        self.playing_red = False
+        self.last_board = None
+
+    def start(self, random_opening=False):
+        assert random_opening is True    # 铜钱场必须以随机中局开局启动
+        _FakeCoinBattleLoop.starts += 1
+        if _FakeCoinBattleLoop.starts >= 3:
+            raise RuntimeError('开局失败（测试用）')
+        return [row[:] for row in _no_red_board()], False
+
+    def update_board(self, board):
+        return False
+
+
+def test_run_coin_battle_restarts_and_clicks():
+    """单局结束后点击坐标续局；第 3 次开局失败 → 'restart_failed'，共点击 2 次。"""
+    _FakeCoinBattleLoop.starts = 0
+    store, tmp = _make_store()
+    clicked = []
+    try:
+        store.add_point(100, 200)
+        store.set_interval(0)
+        advisor = _FakeAdvisor(_no_red_board())
+        with mock.patch('auto_battle.AutoBattle', _FakeCoinBattleLoop), \
+                mock.patch('infinite_battle.wait_for_fresh_position',
+                           return_value='ok'):
+            status = run_coin_battle(advisor, store, restart_wait=0,
+                                     clicker=lambda x, y: clicked.append((x, y)))
+        assert status == 'restart_failed'
+        assert clicked == [(100, 200), (100, 200)]
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_run_coin_battle_no_points():
+    """对局结束但未配置坐标 → 'no_points'（不点击）。"""
+    _FakeCoinBattleLoop.starts = 0
+    store, tmp = _make_store()
+    try:
+        advisor = _FakeAdvisor(_no_red_board())
+        with mock.patch('auto_battle.AutoBattle', _FakeCoinBattleLoop):
+            status = run_coin_battle(advisor, store, restart_wait=0,
+                                     clicker=lambda x, y: None)
+        assert status == 'no_points'
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_run_coin_battle_passes_prev_board_to_fresh_wait():
+    """续局等待新局面时必须带上「上一帧棋盘」（区分新局与结算画面）。"""
+    _FakeCoinBattleLoop.starts = 0
+    store, tmp = _make_store()
+    seen = {}
+    try:
+        store.add_point(100, 200)
+        store.set_interval(0)
+        advisor = _FakeAdvisor(_no_red_board())
+
+        def _wff(*args, **kwargs):
+            seen.update(kwargs)
+            return 'ok'
+
+        with mock.patch('auto_battle.AutoBattle', _FakeCoinBattleLoop), \
+                mock.patch('infinite_battle.wait_for_fresh_position',
+                           side_effect=_wff):
+            run_coin_battle(advisor, store, restart_wait=0,
+                            clicker=lambda x, y: None)
+        assert seen.get('prev_board') is not None
+        assert seen.get('restart_wait') == 0
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_run_coin_battle_reclicks_on_fresh_timeout():
+    """等待新局面超时 → 重新点击坐标序列再等（而非退出）。"""
+    _FakeCoinBattleLoop.starts = 0
+    store, tmp = _make_store()
+    clicked = []
+    try:
+        store.add_point(100, 200)
+        store.set_interval(0)
+        advisor = _FakeAdvisor(_no_red_board())
+        calls = {'n': 0}
+
+        def _wff(*args, **kwargs):
+            calls['n'] += 1
+            return 'timeout' if calls['n'] == 1 else 'ok'
+
+        with mock.patch('auto_battle.AutoBattle', _FakeCoinBattleLoop), \
+                mock.patch('infinite_battle.wait_for_fresh_position',
+                           side_effect=_wff):
+            status = run_coin_battle(advisor, store, restart_wait=0,
+                                     clicker=lambda x, y: clicked.append((x, y)))
+        assert status == 'restart_failed'   # 第 3 次 battle.start() 失败（测试桩）
+        # 第 1 局结束点击 1 次 → 超时重新点击 1 次 → 第 2 局结束点击 1 次
+        assert clicked == [(100, 200), (100, 200), (100, 200)]
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_run_coin_battle_cancelled_by_backtick():
+    """等新局面期间按 ` 键 → 取消续局退出（返回 'stopped'）。"""
+    _FakeCoinBattleLoop.starts = 0
+    store, tmp = _make_store()
+    try:
+        store.add_point(100, 200)
+        store.set_interval(0)
+        advisor = _FakeAdvisor(_no_red_board())
+        with mock.patch('auto_battle.AutoBattle', _FakeCoinBattleLoop), \
+                mock.patch('infinite_battle.wait_for_fresh_position',
+                           return_value='stopped'):
+            status = run_coin_battle(advisor, store, restart_wait=0,
+                                     clicker=lambda x, y: None)
         assert status == 'stopped'
     finally:
         shutil.rmtree(tmp)

@@ -12,10 +12,13 @@ AI 解说配置文件。
 修改后无需重装任何依赖，直接重启程序即生效。
 """
 
+import os
+
 # ===== 必填：API 密钥 =====
-# 在 https://platform.deepseek.com/ 注册后创建 API Key。
-# 留空（""）时 AI 解说功能不可用，请手动填入后再使用。
-API_KEY = "sk-e16f951ec7c34dbd8d7880df7b40b768"
+# 优先从环境变量 DEEPSEEK_API_KEY 读取；未设置时为空，AI 解说功能不可用。
+# 如需本地临时使用，请通过环境变量注入，切勿把明文密钥提交进仓库。
+# Windows 示例：set DEEPSEEK_API_KEY=你的密钥
+API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 
 # ===== 服务端设定（一般不用改）=====
 API_URL = "https://api.deepseek.com/chat/completions"
